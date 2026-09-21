@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<!--
+  SEZ Filing Workbench — MOONSEZ and Management Consultants LLP
+  Web app: HTML + JavaScript in this file, styles in css/sez-filing-workbench.css.
+  Needs internet once per open for the Excel reader (SheetJS from cdnjs); everything else runs offline in the browser.
+  Uploaded registers are stored only in this browser's localStorage, per month.
+-->
+<title>SEZ Filing Workbench</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="css/sez-filing-workbench.css">
+
+</head>
+<body>
+<header class="top">
+  <div class="top-in">
+    <div class="brand">
+      <div class="brand-mark">SEZ</div>
+      <div>
+        <h1>SEZ Filing Workbench</h1>
+        <div class="unitline" id="unitLine"></div>
+      </div>
+    </div>
+    <div class="top-ctl">
+      <a class="btn" href="index.html" style="text-decoration:none">&larr; Back to website</a>
+      <div class="field"><label for="periodMonth">Month</label><select id="periodMonth"></select></div>
+      <div class="field"><label for="periodYear">Year</label><select id="periodYear"></select></div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="strip-wrap"><div class="strip" id="strip" role="tablist" aria-label="Monthly filing steps"></div></div>
+  <div class="samplebar" id="sampleBar">
+    <span class="chip info">Example data</span>
+    <span>Example rows are loaded so every screen shows what it does. Upload your own registers in step 2 — the examples are replaced at once.</span>
+    <button class="btn sm" id="btnClearSample">Clear examples</button>
+  </div>
+  <section id="screen" class="stack" aria-live="polite"></section>
+</main>
+
+<footer>
+  <p><strong>Before filing, verify:</strong> MPR figures against the SEZ Online v3.1 screen (column (a) auto-populated by the portal vs column (b) manual); SERF and DSPF column order against your Item Details Upload Templates (SERF v5, DSPF v1.1); GSTR-1 sheets against the current GST Offline Tool template; due dates against your DC office's practice.</p>
+  <p>Everything runs in your browser. Uploaded registers stay on this device (saved per month in this browser only) and are never sent anywhere.</p>
+</footer>
+<div id="modalHost"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script>
+/* ============================================================
+   SEZ Monthly Filing Desk — single-file app
+   ============================================================ */
+(function(){
+'use strict';
+const $=(s,r=document)=>r.querySelector(s);
+const el=(tag,attrs,...kids)=>{const e=document.createElement(tag);for(const[k,v]of Object.entries(attrs||{})){if(k==='class')e.className=v;else if(k==='html')e.innerHTML=v;else if(k.startsWith('on'))e.addEventListener(k.slice(2),v);else if(v!==undefined&&v!==null)e.setAttribute(k,v);}for(const k of kids.flat()){if(k==null)continue;e.append(k.nodeType?k:document.createTextNode(k));}return e;};
+const MONTHS=['April','May','June','July','August','September','October','November','December','January','February','March'];
+const MON_SHORT=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const CAP_WORDS=/\b(capital|machine|machinery|equipment|server|laptop|computer|furniture|fixture|plant|vehicle|generator|ups|ac unit|air condition|printer|hardware|software licen)/i;
+
+/* ---------- state ---------- */
+const UNIT_FIELDS=[
+  ['name','Unit name (as per LOA)','wide'],['type','Unit type','sel:SEZ Unit|IFSC Unit|SEZ Developer'],['sez','SEZ / zone name','wide'],['dc','DC office / Specified Officer',''],
+  ['gstin','GSTIN',''],['pan','PAN',''],['iec','IEC',''],['tan','TAN',''],['cin','CIN / LLPIN',''],
+  ['loa','LOA number',''],['loaDate','LOA date','date'],['loaValid','LOA valid till','date'],['blut','Bond-cum-LUT (SEZ) no.',''],['lut','GST LUT ARN & FY',''],
+  ['sector','Sector / authorised operations','wide'],['adcode','AD bank & AD code',''],['contact','Authorised signatory',''],['email','Contact email','']
+];
+const S={
+  unit:{name:'',gstin:''},
+  screen:'unit', checks:{},
+  period:{m:0,y:0},           // m: 0-11 calendar month index
+  reg:{emp:null,pur:null,sal:null,g2b:null,trade:null}, // each: {file, headers, rows(raw objects), map, data(normalized), sheets}
+  opening:{invCr:0,expFob:0,expSvc:0,impCap:0,impRaw:0,dtaProc:0,dtaSale:0},
+  sample:true, docTab:'mpr', recTab:'r2b'
+};
+
+/* ---------- field definitions (what we look for in each file) ---------- */
+const FIELDS={
+  emp:[
+    ['name','Employee name',true,['employeename','name','empname','fullname','nameofemployee']],
+    ['gender','Gender',true,['gender','sex','malefemale']],
+    ['category','Direct / Contract',false,['category','employmenttype','type','directcontract','engagement','nature']],
+    ['doj','Date of joining',false,['doj','dateofjoining','joiningdate','joined','startdate']],
+    ['dol','Date of leaving',false,['dol','dateofleaving','leavingdate','relievingdate','exitdate','enddate','lastworkingday']],
+    ['designation','Designation',false,['designation','role','title','position']],
+    ['nationality','Nationality',false,['nationality','country','citizenship']],
+  ],
+  pur:[
+    ['date','Invoice date',true,['invoicedate','date','billdate','docdate','dateofinvoice']],
+    ['invno','Invoice number',true,['invoicenumber','invoiceno','invno','billno','documentno','voucherno','invoice']],
+    ['supplier','Supplier name',true,['suppliername','vendorname','supplier','vendor','partyname','party','name']],
+    ['gstin','Supplier GSTIN',false,['gstin','suppliergstin','vendorgstin','gstno','gstinuin']],
+    ['type','Supply type (Import / DTA / SEZ)',false,['supplytype','type','source','naturesupply','category','purchasetype','importdta']],
+    ['goods','Capital / Non-capital',false,['capitalnoncapital','goodstype','assettype','capital','natureofgoods','itemtype']],
+    ['desc','Description',false,['description','item','particulars','goodsdescription','narration','product']],
+    ['hsn','HSN / SAC',false,['hsn','hsnsac','hsncode','sac','saccode']],
+    ['currency','Currency',false,['currency','curr','ccy']],
+    ['fc','Value in foreign currency',false,['fcvalue','foreigncurrencyvalue','valueinfc','fxvalue','amountfc','fcamount','valuefc']],
+    ['taxable','Taxable / CIF value (INR)',true,['taxablevalue','cifvalue','cif','assessablevalue','valueinr','inrvalue','amountinr','basicvalue','taxableamount','netamount','amount','value']],
+    ['igst','IGST',false,['igst','igstamount','integratedtax']],
+    ['total','Invoice total',false,['invoicevalue','totalvalue','total','grandtotal','invoicetotal','totalamount']],
+    ['boe','BOE number',false,['boeno','boenumber','billofentry','billofentryno','beno']],
+    ['country','Country of origin',false,['country','countryoforigin','origin']],
+  ],
+  sal:[
+    ['date','Invoice date',true,['invoicedate','date','billdate','docdate']],
+    ['invno','Invoice number',true,['invoicenumber','invoiceno','invno','billno','documentno','invoice','noteno','notenumber']],
+    ['doctype','Document type (Invoice / CN / DN)',false,['documenttype','doctype','type','notetype','voucher']],
+    ['buyer','Customer name',true,['customername','buyername','clientname','customer','buyer','client','partyname','party','receivername','name']],
+    ['gstin','Customer GSTIN',false,['gstin','customergstin','buyergstin','recipientgstin','gstno','gstinuin']],
+    ['country','Country',false,['country','countryofbuyer','destination','countryofdestination']],
+    ['stype','Supply type (Export / DTA / SEZ)',false,['supplytype','type','natureofsupply','category','saletype','exportdta','exporttype']],
+    ['hsn','HSN / SAC',false,['hsn','hsnsac','hsncode','sac','saccode','servicecode']],
+    ['desc','Description',false,['description','service','servicedescription','particulars','item','narration','product']],
+    ['currency','Currency',false,['currency','curr','ccy']],
+    ['fc','Value in foreign currency',false,['fcvalue','foreigncurrencyvalue','valueinfc','fxvalue','amountfc','fcamount','valuefc','invoicevaluefc']],
+    ['rate','Exchange rate',false,['exchangerate','exrate','rate' ,'conversionrate','fxrate']],
+    ['taxable','Taxable / FOB value (INR)',true,['taxablevalue','fobvalue','fob','valueinr','inrvalue','amountinr','basicvalue','taxableamount','netamount','amount','value']],
+    ['gstrate','GST rate %',false,['gstrate','taxrate','igstrate','ratepercent']],
+    ['igst','IGST',false,['igst','igstamount','integratedtax','tax']],
+    ['total','Invoice total',false,['invoicevalue','totalvalue','total','grandtotal','invoicetotal','totalamount']],
+    ['pos','Place of supply',false,['placeofsupply','pos','state','statecode']],
+    ['sbno','Shipping bill no.',false,['shippingbillno','sbno','shippingbill','sbnumber']],
+    ['sbdate','Shipping bill date',false,['shippingbilldate','sbdate']],
+    ['port','Port code',false,['portcode','port']],
+    ['address','Customer address',false,['address','customeraddress','buyeraddress','clientaddress']],
+    ['mode','Mode of delivery / receipt',false,['modeofdelivery','mode','deliverymode','modeofreceipt','moderemittance']],
+    ['bank','Bank / AD code',false,['bank','adcode','bankname','remittancebank']],
+  ],
+  g2b:[
+    ['gstin','Supplier GSTIN',true,['gstinofsupplier','gstin','suppliergstin','gstinuin']],
+    ['name','Supplier name',false,['tradelegalnameofthesupplier','tradelegalname','tradename','legalname','suppliername','name']],
+    ['invno','Invoice number',true,['invoicenumber','invoiceno','invno','documentnumber','noteno','notenumber']],
+    ['date','Invoice date',false,['invoicedate','date','documentdate','notedate']],
+    ['total','Invoice value',false,['invoicevalue','totalvalue','notevalue','value']],
+    ['taxable','Taxable value',true,['taxablevalue','taxableamount']],
+    ['igst','IGST',false,['integratedtax','igst','integratedtaxrs']],
+    ['cgst','CGST',false,['centraltax','cgst']],
+    ['sgst','SGST',false,['stateuttax','statetax','sgst','utgst']],
+    ['itc','ITC availability',false,['itcavailability','itcavailable','itc']],
+    ['period','Return period',false,['gstr1iffgstr5period','returnperiod','period','gstr1period']],
+  ],
+  trade:[
+    ['docno','BOE / SB / document no.',true,['shippingbillno','sbno','shippingbillnumber','boeno','billofentryno','billofentrynumber','beno','documentno','docno','requestid','sezonlinerequestid','dtasaleno','arno']],
+    ['docdate','Document date',false,['shippingbilldate','sbdate','boedate','billofentrydate','documentdate','date','submissiondate','assessmentdate']],
+    ['invno','Invoice number',true,['invoiceno','invoicenumber','invno','invoice','commercialinvoiceno']],
+    ['invdate','Invoice date',false,['invoicedate']],
+    ['party','Party name',false,['exportername','importername','buyername','consigneename','suppliername','party','partyname','name','dtaunit','dtaunitname']],
+    ['currency','Currency',false,['currency','curr','ccy','invoicecurrency']],
+    ['fc','Value in foreign currency',false,['fobvaluefc','invoicevaluefc','fcvalue','valueinfc','cifvaluefc','fobfc','amountfc']],
+    ['inr','Value in INR (FOB / CIF / assessable)',true,['fobvalueinr','fobinr','fobvalue','cifvalueinr','cifinr','cifvalue','assessablevalue','assessablevalueinr','valueinr','inrvalue','totalvalueinr','invoicevalueinr','amountinr','value','amount']],
+    ['kind','Transaction type (Export / Import / DTA)',false,['transactiontype','type','module','documenttype','naturetransaction','category']],
+    ['status','Status',false,['status','requeststatus','assessmentstatus']],
+  ]
+};
+const REG_META={
+  emp:{title:'Employee register',hint:'Name, gender, direct/contract, joining & leaving dates',feeds:'MPR employment'},
+  pur:{title:'Purchase register',hint:'Imports, DTA and SEZ procurement — INR / FX, capital / non-capital',feeds:'MPR investment & imports · 2B check'},
+  sal:{title:'Sales register',hint:'Exports (goods/services), DTA sales, credit / debit notes',feeds:'MPR exports · SERF · GSTR-1'},
+  g2b:{title:'GSTR-2B (GST portal Excel)',hint:'Download from GST portal → Returns → GSTR-2B → Download Excel',feeds:'Compared with purchase register'},
+  trade:{title:'SEZ Online trade data',hint:'BOE / Shipping Bill / DTA sale & procurement reports (one or more files / sheets)',feeds:'Compared with purchase & sales registers'},
+};
+
+/* ---------- helpers ---------- */
+const norm=s=>String(s??'').toLowerCase().replace(/[^a-z0-9]/g,'');
+const normInv=s=>String(s??'').toUpperCase().replace(/[^A-Z0-9]/g,'').replace(/^0+(?=\d)/,'');
+const num=v=>{if(v==null||v==='')return 0;if(typeof v==='number')return isFinite(v)?v:0;let s=String(v).replace(/[₹$€£,\s]/g,'');let neg=false;if(/^\(.*\)$/.test(s)){neg=true;s=s.slice(1,-1);}const n=parseFloat(s);return isNaN(n)?0:(neg?-n:n);};
+function toDate(v){
+  if(v==null||v==='')return null;
+  if(v instanceof Date)return isNaN(v)?null:v;
+  if(typeof v==='number'){ if(v>20000&&v<80000){const d=new Date(Math.round((v-25569)*86400*1000));return isNaN(d)?null:new Date(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate());} return null;}
+  const s=String(v).trim();
+  let m=s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/); if(m){let y=+m[3];if(y<100)y+=2000;return new Date(y,+m[2]-1,+m[1]);}
+  m=s.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})/); if(m)return new Date(+m[1],+m[2]-1,+m[3]);
+  m=s.match(/^(\d{1,2})[\s\-]([A-Za-z]{3})[A-Za-z]*[\s\-,]+(\d{2,4})/); if(m){const mi=MON_SHORT.findIndex(x=>x.toLowerCase()===m[2].slice(0,3).toLowerCase());if(mi>=0){let y=+m[3];if(y<100)y+=2000;return new Date(y,mi,+m[1]);}}
+  const d=new Date(s);return isNaN(d)?null:d;
+}
+const fmtD=d=>(d instanceof Date&&!isNaN(d))?`${String(d.getDate()).padStart(2,'0')}-${MON_SHORT[d.getMonth()]}-${d.getFullYear()}`:'';
+const fmtGst=fmtD;
+const inr=n=>Math.round(n||0).toLocaleString('en-IN');
+const inr2=n=>(n||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+const cr=n=>((n||0)/1e7).toFixed(4);
+const lakh=n=>((n||0)/1e5).toFixed(2);
+const fx=n=>(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+function periodRange(){const s=new Date(S.period.y,S.period.m,1);const e=new Date(S.period.y,S.period.m+1,0);return[s,e];}
+function periodLabel(){return `${MON_SHORT[S.period.m]} ${S.period.y}`;}
+function fyLabel(){const y=S.period.m>=3?S.period.y:S.period.y-1;return `${y}-${String(y+1).slice(2)}`;}
+function inPeriod(d){if(!d)return false;const[s,e]=periodRange();return d>=s&&d<=e;}
+function guessType(row,kind){ // purchase supply type
+  const t=norm(row.type);
+  if(/import/.test(t))return'Import';if(/sez/.test(t))return'SEZ';if(/ifsc/.test(t))return'SEZ';if(/dta|domestic|local|india/.test(t))return'DTA';if(/service/.test(t))return row.gstin?'DTA':'Import';
+  if(row.currency&&norm(row.currency)!=='inr'&&norm(row.currency)!=='rs')return'Import';
+  if(row.boe)return'Import';
+  if(row.gstin)return'DTA';
+  if(row.country&&!/india|^in$/i.test(String(row.country)))return'Import';
+  return'DTA';
+}
+function guessSaleType(row){
+  const t=norm(row.stype);
+  if(/exportservice|service/.test(t))return'Export-Service';if(/exportgood|physical|goods/.test(t))return'Export-Goods';if(/export/.test(t))return row.sbno?'Export-Goods':'Export-Service';
+  if(/sez|ifsc/.test(t))return'SEZ';if(/dta|domestic|local|b2b|b2c/.test(t))return'DTA';
+  if(row.sbno)return'Export-Goods';
+  const foreign=row.country&&!/india|^in$/i.test(String(row.country));
+  const fxc=row.currency&&!/^(inr|rs|rupee)/i.test(String(row.currency));
+  if(foreign||fxc)return'Export-Service';
+  if(row.gstin&&/^\d{2}[A-Z0-9]{13}$/.test(String(row.gstin).toUpperCase().replace(/\s/g,'')))return'DTA';
+  return'DTA';
+}
+function guessGoods(row){const g=norm(row.goods);if(/capital|asset|fixed/.test(g))return'Capital';if(g)return'Non-capital';return CAP_WORDS.test(String(row.desc||''))?'Capital':'Non-capital';}
+function guessDoc(row){const t=norm(row.doctype);if(/credit|cn$|^cn/.test(t))return'CN';if(/debit|dn$|^dn/.test(t))return'DN';if(/^[cC]/.test(String(row.invno||''))&&/cn/i.test(String(row.invno)))return'CN';if(num(row.taxable)<0)return'CN';return'INV';}
+function gender(v){const g=norm(v);if(/^m|male/.test(g)&&!/female/.test(g))return'M';if(/^f|female|women|woman/.test(g))return'F';if(/trans|tg|other/.test(g))return'T';return'O';}
+
+/* ---------- file reading ---------- */
+async function readWorkbook(file){
+  const buf=await file.arrayBuffer();
+  const wb=XLSX.read(buf,{type:'array',cellDates:true});
+  return wb.SheetNames.map(n=>{
+    const ws=wb.Sheets[n];const aoa=XLSX.utils.sheet_to_json(ws,{header:1,defval:'',raw:true,blankrows:false});
+    return{name:n,aoa};
+  }).filter(s=>s.aoa.length>0);
+}
+function detectHeaderRow(aoa,kind){ // find the row that looks like headers (most matches with field synonyms)
+  const syn=FIELDS[kind].flatMap(f=>f[3]);let best=0,bestScore=-1;
+  for(let i=0;i<Math.min(aoa.length,15);i++){
+    const cells=aoa[i].map(norm).filter(Boolean);if(cells.length<2)continue;
+    let sc=0;for(const c of cells){if(syn.some(s=>c===s||c.includes(s)))sc++;}
+    const textRatio=cells.filter(c=>/[a-z]/.test(c)).length/cells.length;
+    sc+=textRatio; if(sc>bestScore){bestScore=sc;best=i;}
+  }
+  return best;
+}
+function autoMap(headers,kind){
+  const map={};const used=new Set();
+  const nh=headers.map(norm);
+  for(const[key,,,syns]of FIELDS[kind]){
+    let found=-1;
+    for(const s of syns){const i=nh.findIndex((h,ix)=>!used.has(ix)&&h===s);if(i>=0){found=i;break;}}
+    if(found<0)for(const s of syns){const i=nh.findIndex((h,ix)=>!used.has(ix)&&h.includes(s)&&s.length>=3);if(i>=0){found=i;break;}}
+    if(found>=0){map[key]=found;used.add(found);}
+  }
+  return map;
+}
+function applyMap(sheet,hdrIdx,map){
+  const headers=sheet.aoa[hdrIdx];const out=[];
+  for(let i=hdrIdx+1;i<sheet.aoa.length;i++){
+    const r=sheet.aoa[i];if(!r||r.every(c=>c===''||c==null))continue;
+    const o={_row:i+1};let any=false;
+    for(const[k,ci]of Object.entries(map)){if(ci==null||ci==='')continue;o[k]=r[ci];if(o[k]!==''&&o[k]!=null)any=true;}
+    if(any)out.push(o);
+  }
+  return out;
+}
+
+/* ---------- normalisation per register ---------- */
+function normalize(kind,rows){
+  if(kind==='emp')return rows.filter(r=>r.name).map(r=>({name:String(r.name).trim(),g:gender(r.gender),cat:/contract|outsourc|agency|temp|third/i.test(String(r.category||''))?'Contract':'Direct',doj:toDate(r.doj),dol:toDate(r.dol),desig:r.designation||'',nat:r.nationality||''}));
+  if(kind==='pur')return rows.filter(r=>r.invno||r.taxable).map(r=>{const o={date:toDate(r.date),invno:String(r.invno??'').trim(),supplier:String(r.supplier??'').trim(),gstin:String(r.gstin??'').toUpperCase().replace(/\s/g,''),desc:r.desc||'',hsn:String(r.hsn??''),currency:(String(r.currency||'INR').toUpperCase().trim()||'INR'),fc:num(r.fc),taxable:num(r.taxable),igst:num(r.igst),total:num(r.total),boe:String(r.boe??'').trim(),country:r.country||'',type:r.type,goods:r.goods};o.stype=guessType(o);o.cap=guessGoods(o);if(!o.total)o.total=o.taxable+o.igst;return o;});
+  if(kind==='sal')return rows.filter(r=>r.invno||r.taxable).map(r=>{const o={date:toDate(r.date),invno:String(r.invno??'').trim(),buyer:String(r.buyer??'').trim(),gstin:String(r.gstin??'').toUpperCase().replace(/\s/g,''),country:String(r.country??'').trim(),hsn:String(r.hsn??''),desc:r.desc||'',currency:(String(r.currency||'INR').toUpperCase().trim()||'INR'),fc:num(r.fc),rate:num(r.rate),taxable:num(r.taxable),gstrate:num(r.gstrate),igst:num(r.igst),total:num(r.total),pos:String(r.pos??''),sbno:String(r.sbno??'').trim(),sbdate:toDate(r.sbdate),port:String(r.port??''),address:r.address||'',mode:r.mode||'',bank:r.bank||'',stype:r.stype,doctype:r.doctype};o.kind=guessSaleType(o);o.doc=guessDoc(o);if(!o.total)o.total=o.taxable+o.igst;if(!o.rate&&o.fc)o.rate=o.taxable/o.fc;if(o.currency==='INR'&&o.fc&&!o.taxable){o.taxable=o.fc;}return o;});
+  if(kind==='g2b')return rows.filter(r=>r.gstin&&r.invno).map(r=>({gstin:String(r.gstin).toUpperCase().replace(/\s/g,''),name:r.name||'',invno:String(r.invno).trim(),date:toDate(r.date),total:num(r.total),taxable:num(r.taxable),igst:num(r.igst),cgst:num(r.cgst),sgst:num(r.sgst),itc:r.itc||'',period:r.period||''}));
+  if(kind==='trade')return rows.filter(r=>r.docno||r.invno).map(r=>{const o={docno:String(r.docno??'').trim(),docdate:toDate(r.docdate),invno:String(r.invno??'').trim(),invdate:toDate(r.invdate),party:r.party||'',currency:(String(r.currency||'INR').toUpperCase().trim()||'INR'),fc:num(r.fc),inr:num(r.inr),status:r.status||'',kindRaw:r.kind,sheet:r._sheetKind};o.kind=o.sheet||(/export|sb|shipping/i.test(String(o.kindRaw))?'Export':/import|boe|bill of entry/i.test(String(o.kindRaw))?'Import':/dtasale|dta sale|sale/i.test(String(o.kindRaw))?'DTA-Sale':/dtaproc|procure|purchase/i.test(String(o.kindRaw))?'DTA-Proc':'Export');return o;});
+}
+function classifyTradeSheet(sheet,hdr){const h=sheet.aoa[hdr].map(norm).join('|')+'|'+norm(sheet.name);if(/shippingbill|sbno|exporter|fob/.test(h))return'Export';if(/billofentry|boe|importer|cif|assessable/.test(h))return'Import';if(/dtasale|dtaunit.*sale|zerorated|arno/.test(h))return'DTA-Sale';if(/dtaproc|procure/.test(h))return'DTA-Proc';return null;}
+
+/* ---------- persistence ---------- */
+const storeKey=()=>`sezdesk:${S.period.y}-${S.period.m}`;
+function save(){try{const dump={unit:S.unit,opening:S.opening,checks:S.checks,reg:{}};for(const k of Object.keys(S.reg)){const r=S.reg[k];if(r&&!r.sample)dump.reg[k]={file:r.file,data:r.data,count:r.data.length};}localStorage.setItem(storeKey(),JSON.stringify(dump));localStorage.setItem('sezdesk:unit',JSON.stringify(S.unit));localStorage.setItem('sezdesk:last',JSON.stringify(S.period));}catch(e){}}
+function load(){
+  try{const u=JSON.parse(localStorage.getItem('sezdesk:unit')||'null');if(u)S.unit=u;}catch(e){}
+  let hit=false;
+  try{const d=JSON.parse(localStorage.getItem(storeKey())||'null');
+    for(const k of Object.keys(S.reg))S.reg[k]=null;
+    S.checks={};
+    if(d){S.opening=Object.assign({invCr:0,expFob:0,expSvc:0,impCap:0,impRaw:0,dtaProc:0,dtaSale:0},d.opening||{});S.checks=d.checks||{};
+      for(const[k,v]of Object.entries(d.reg||{})){v.data.forEach(r=>{for(const f of['date','doj','dol','sbdate','docdate','invdate'])if(r[f])r[f]=new Date(r[f]);});S.reg[k]={file:v.file,data:v.data,sample:false};hit=true;}
+    } else S.opening={invCr:0,expFob:0,expSvc:0,impCap:0,impRaw:0,dtaProc:0,dtaSale:0};
+  }catch(e){}
+  return hit;
+}
+
+/* ---------- sample data ---------- */
+function loadSample(){
+  const y=S.period.y,m=S.period.m;const D=(d,mm=m,yy=y)=>new Date(yy,mm,d);
+  S.sample=true;
+  S.reg.emp={sample:true,file:'example_employee_register.xlsx',data:[
+    ['Aarav Shah','M','Direct',D(12,3,2023)],['Priya Nair','F','Direct',D(1,6,2024)],['Rohan Mehta','M','Direct',D(15,8,2022)],['Sneha Kulkarni','F','Direct',D(3,0,2025)],['Vikram Joshi','M','Contract',D(1,3,2026)],['Ananya Rao','F','Direct',D(20,10,2024)],['Kabir Singh','M','Direct',D(2,m,y)],['Meera Iyer','F','Contract',D(10,4,2026)],['Dev Patel','M','Direct',D(18,1,2024),D(25,m,y)],['Ishita Bose','F','Direct',D(7,7,2025)],['Arjun Verma','M','Direct',D(14,9,2023)],['Ritu Desai','F','Direct',D(6,m,y)]
+  ].map(a=>({name:a[0],g:a[1],cat:a[2],doj:a[3],dol:a[4]||null,desig:'',nat:'Indian'}))};
+  const pur=[
+    [D(3),'ACS/26-27/0412','Acme Components LLC','', 'Import','Capital','Rack servers 2U (x4)','84714190','USD',18500,1546000,0,'','United States','BOE 7712345'],
+    [D(5),'INV-2607','Tata Consultancy Services Ltd','27AAACR4849R1ZL','DTA','Non-capital','Cloud hosting – monthly','998315','INR',0,240000,43200,'',''],
+    [D(8),'GJ/0899','Gujarat Infoways Pvt Ltd','24AABCG1234F1Z2','DTA','Non-capital','Leased line – Aug','998414','INR',0,85000,15300,'',''],
+    [D(11),'SO-55821','SoftNet Licensing GmbH','', 'Import','Non-capital','Annual software licences','997331','EUR',6200,585000,0,'','Germany',''],
+    [D(12),'FRN/2033','Featherlite Furniture Pvt Ltd','29AAACF5555K1ZP','DTA','Capital','Workstations & chairs (24)','94033010','INR',0,612000,110160,'',''],
+    [D(15),'PWR/0817','Torrent Power Ltd','24AAACT5555A1Z9','DTA','Non-capital','Electricity – unit','996911','INR',0,132400,0,'',''],
+    [D(19),'ZS/1181','Zenith Staffing Solutions','24AAECZ9876B1Z4','DTA','Non-capital','Contract staffing – Aug','998513','INR',0,310000,55800,'',''],
+    [D(22),'IFS/0052','GIFT Fintech IFSC Unit','24AAJCG1111C1ZQ','SEZ','Non-capital','Data feed subscription','998431','USD',1200,101000,0,'','India',''],
+    [D(26),'OFF/7781','Office Depot India','24AAACO2222D1Z3','DTA','Non-capital','Stationery & consumables','48201090','INR',0,18600,3348,'',''],
+    [D(28),'ACS/26-27/0466','Acme Components LLC','', 'Import','Non-capital','Spare parts & cables','85444999','USD',2150,180000,0,'','United States','BOE 7719002'],
+  ].map(a=>({date:a[0],invno:a[1],supplier:a[2],gstin:a[3],stype:a[4],cap:a[5],desc:a[6],hsn:a[7],currency:a[8],fc:a[9],taxable:a[10],igst:a[11],total:a[10]+a[11],boe:a[14]?a[14].replace('BOE ',''):'',country:a[13]||'India'}));
+  S.reg.pur={sample:true,file:'example_purchase_register.xlsx',data:pur};
+  const sal=[
+    [D(2),'EXP/26-27/031','INV','Northwind Analytics Inc','','United States','Export-Service','998314','Software development services',  'USD',42000,83.6,3511200,0,0,'','','','','1 Market St, San Francisco, CA','Electronic','HDFC Bank – AD 0510'],
+    [D(6),'EXP/26-27/032','INV','Contoso Pty Ltd','','Australia','Export-Service','998313','IT consulting – Aug', 'AUD',18000,55.1,991800,0,0,'','','','','Level 4, Collins St, Melbourne','Electronic','HDFC Bank – AD 0510'],
+    [D(9),'EXP/26-27/033','INV','Globex GmbH','','Germany','Export-Service','998315','Managed cloud support','EUR',22500,94.2,2119500,0,0,'','','','','Hauptstr. 12, Frankfurt','Electronic','HDFC Bank – AD 0510'],
+    [D(12),'EXP/26-27/034','INV','Initech Ltd','','United Kingdom','Export-Goods','84713010','Assembled edge devices (40)','GBP',26000,107.4,2792400,0,0,'','7734512',D(13),'INAMD4','Reading, Berkshire','Courier',''],
+    [D(15),'DTA/26-27/007','INV','Reliance Retail Ltd','27AAACR5055K1Z7','India','DTA','998314','Application support – DTA','INR',0,0,450000,18,81000,'27','','','','Mumbai','',''],
+    [D(18),'EXP/26-27/035','INV','Umbrella Health LLC','','United States','Export-Service','998314','Platform engineering','USD',31500,83.7,2636550,0,0,'','','','','Austin, TX','Electronic','HDFC Bank – AD 0510'],
+    [D(21),'DTA/26-27/008','INV','Kalyani Tech Park Pvt Ltd','29AAACK1111L1Z5','India','DTA','998319','Licence fee – DTA','INR',0,0,180000,18,32400,'29','','','','Bengaluru','',''],
+    [D(24),'CN/26-27/003','CN','Northwind Analytics Inc','','United States','Export-Service','998314','Credit note – rate revision on EXP/031','USD',-2000,83.6,-167200,0,0,'','','','','San Francisco','Electronic',''],
+    [D(27),'SEZ/26-27/002','INV','GIFT Fintech IFSC Unit','24AAJCG1111C1ZQ','India','SEZ','998314','Inter-SEZ development services','INR',0,0,260000,0,0,'24','','','','GIFT City, Gandhinagar','',''],
+    [D(29),'EXP/26-27/036','INV','Stark Systems BV','','Netherlands','Export-Service','998316','Data analytics services','EUR',12800,94.3,1207040,0,0,'','','','','Amsterdam','Electronic','HDFC Bank – AD 0510'],
+  ].map(a=>({date:a[0],invno:a[1],doc:a[2],buyer:a[3],gstin:a[4],country:a[5],kind:a[6],hsn:a[7],desc:a[8],currency:a[9],fc:a[10],rate:a[11],taxable:a[12],gstrate:a[13],igst:a[14],total:a[12]+a[14],pos:a[15],sbno:a[16],sbdate:a[17]||null,port:a[18],address:a[19],mode:a[20],bank:a[21]}));
+  S.reg.sal={sample:true,file:'example_sales_register.xlsx',data:sal};
+  S.reg.g2b={sample:true,file:'example_GSTR2B.xlsx',data:[
+    ['27AAACR4849R1ZL','TATA CONSULTANCY SERVICES LIMITED','INV-2607',D(5),283200,240000,43200],
+    ['24AABCG1234F1Z2','GUJARAT INFOWAYS PRIVATE LIMITED','GJ/0899',D(8),100300,85000,15300],
+    ['29AAACF5555K1ZP','FEATHERLITE FURNITURE PVT LTD','FRN/2033',D(12),708000,600000,108000],
+    ['24AAECZ9876B1Z4','ZENITH STAFFING SOLUTIONS','ZS/1181',D(19),365800,310000,55800],
+    ['24AAACO2222D1Z3','OFFICE DEPOT INDIA','OFF/7781',D(26),21948,18600,3348],
+    ['24AAACM7777E1Z8','MAHANAGAR TELECOM LTD','MT/44120',D(20),14160,12000,2160],
+  ].map(a=>({gstin:a[0],name:a[1],invno:a[2],date:a[3],total:a[4],taxable:a[5],igst:a[6],cgst:0,sgst:0,itc:'Yes',period:`${MON_SHORT[m]}${y}`}))};
+  S.reg.trade={sample:true,file:'example_SEZOnline_SB_BOE.xlsx',data:[
+    ['7734512',D(13),'EXP/26-27/034',D(12),'Initech Ltd','GBP',26000,2792400,'Export','LEO granted'],
+    ['SERF-0808-011',D(31),'EXP/26-27/031',D(2),'Northwind Analytics Inc','USD',42000,3511200,'Export','Submitted'],
+    ['SERF-0808-012',D(31),'EXP/26-27/032',D(6),'Contoso Pty Ltd','AUD',18000,991800,'Export','Submitted'],
+    ['SERF-0808-013',D(31),'EXP/26-27/033',D(9),'Globex GmbH','EUR',22500,2119500,'Export','Submitted'],
+    ['SERF-0808-014',D(31),'EXP/26-27/035',D(18),'Umbrella Health LLC','USD',31500,2636550,'Export','Submitted'],
+    ['7712345',D(4),'ACS/26-27/0412',D(3),'Acme Components LLC','USD',18500,1546000,'Import','Out of charge'],
+    ['7719002',D(29),'ACS/26-27/0466',D(28),'Acme Components LLC','USD',2150,181500,'Import','Out of charge'],
+    ['7720117',D(30),'SO-55821',D(11),'SoftNet Licensing GmbH','EUR',6200,585000,'Import','Assessed'],
+    ['DTA-0808-004',D(16),'DTA/26-27/007',D(15),'Reliance Retail Ltd','INR',0,450000,'DTA-Sale','Approved'],
+  ].map(a=>({docno:a[0],docdate:a[1],invno:a[2],invdate:a[3],party:a[4],currency:a[5],fc:a[6],inr:a[7],kind:a[8],status:a[9]}))};
+  S.opening={invCr:4.2150,expFob:8340000,expSvc:41280000,impCap:1980000,impRaw:2750000,dtaProc:4820000,dtaSale:2250000};
+  if(!S.unit.name){S.unit={_sample:true,name:'Example Softech SEZ Unit Pvt Ltd',type:'SEZ Unit',sez:'Example IT/ITES SEZ, Pune',dc:'Office of the DC, SEEPZ SEZ',gstin:'27AAACE1234F1Z5',pan:'AAACE1234F',iec:'0312345678',tan:'PNEE12345A',cin:'U72900PN2019PTC123456',loa:'SEEPZ/IT/PUNE/2019/0123',loaDate:'2019-06-14',loaValid:'2029-06-13',blut:'BLUT/2019/045',lut:'AD270426001234X · FY 2026-27',sector:'IT / ITES – software development & support services',adcode:'HDFC Bank – AD 0510',contact:'Authorised Signatory',email:''};}
+}
+
+/* ---------- MPR computation ---------- */
+function computeMPR(){
+  const emp=(S.reg.emp?.data)||[],pur=(S.reg.pur?.data)||[],sal=(S.reg.sal?.data)||[];
+  const[ps,pe]=periodRange();
+  const active=emp.filter(e=>(!e.doj||e.doj<=pe)&&(!e.dol||e.dol>pe));
+  const cnt=(arr,f)=>arr.filter(f).length;
+  const E={
+    direct:{M:cnt(active,e=>e.cat==='Direct'&&e.g==='M'),F:cnt(active,e=>e.cat==='Direct'&&e.g==='F'),T:cnt(active,e=>e.cat==='Direct'&&(e.g==='T'||e.g==='O'))},
+    contract:{M:cnt(active,e=>e.cat==='Contract'&&e.g==='M'),F:cnt(active,e=>e.cat==='Contract'&&e.g==='F'),T:cnt(active,e=>e.cat==='Contract'&&(e.g==='T'||e.g==='O'))},
+    joined:cnt(emp,e=>inPeriod(e.doj)),left:cnt(emp,e=>inPeriod(e.dol)),foreign:cnt(active,e=>e.nat&&!/india|indian/i.test(String(e.nat))),total:active.length
+  };
+  const pm=pur.filter(p=>inPeriod(p.date)),sm=sal.filter(s=>inPeriod(s.date));
+  const sum=(arr,f)=>arr.reduce((a,x)=>a+(f(x)||0),0);
+  const byCcy=(arr)=>{const o={};for(const x of arr){if(!x.currency||x.currency==='INR')continue;o[x.currency]=(o[x.currency]||0)+x.fc;}return o;};
+  const expG=sm.filter(s=>s.kind==='Export-Goods'),expS=sm.filter(s=>s.kind==='Export-Service');
+  const T={
+    expGoods:sum(expG,s=>s.taxable),expGoodsFx:byCcy(expG),
+    expSvc:sum(expS,s=>s.taxable),expSvcFx:byCcy(expS),
+    dtaSale:sum(sm.filter(s=>s.kind==='DTA'),s=>s.taxable),sezSale:sum(sm.filter(s=>s.kind==='SEZ'),s=>s.taxable),
+    impCap:sum(pm.filter(p=>p.stype==='Import'&&p.cap==='Capital'),p=>p.taxable),impRaw:sum(pm.filter(p=>p.stype==='Import'&&p.cap!=='Capital'),p=>p.taxable),
+    impFx:byCcy(pm.filter(p=>p.stype==='Import')),
+    dtaProcCap:sum(pm.filter(p=>p.stype==='DTA'&&p.cap==='Capital'),p=>p.taxable),dtaProcRaw:sum(pm.filter(p=>p.stype==='DTA'&&p.cap!=='Capital'),p=>p.taxable),
+    sezProc:sum(pm.filter(p=>p.stype==='SEZ'),p=>p.taxable),
+  };
+  T.capAdd=T.impCap+T.dtaProcCap+sum(pm.filter(p=>p.stype==='SEZ'&&p.cap==='Capital'),p=>p.taxable);
+  const O=S.opening;
+  const C={invCr:(+O.invCr||0)+T.capAdd/1e7,expGoods:(+O.expFob||0)+T.expGoods,expSvc:(+O.expSvc||0)+T.expSvc,impCap:(+O.impCap||0)+T.impCap,impRaw:(+O.impRaw||0)+T.impRaw,dtaProc:(+O.dtaProc||0)+T.dtaProcCap+T.dtaProcRaw,dtaSale:(+O.dtaSale||0)+T.dtaSale};
+  C.nfe=(C.expGoods+C.expSvc)-(C.impCap+C.impRaw);
+  return{E,T,C,active,pm,sm};
+}
+
+/* ---------- SERF rows ---------- */
+function serfRows(){const sal=(S.reg.sal?.data)||[];const rows=sal.filter(s=>inPeriod(s.date)&&s.kind==='Export-Service'&&s.doc!=='CN');
+  return rows.map((s,i)=>({'Sr. No.':i+1,'Invoice No.':s.invno,'Invoice Date':fmtD(s.date),'Client Name':s.buyer,'Client Address':s.address||'','Country of Client':s.country||'','Service Category / SAC':s.hsn||'','Service Description':s.desc||'','Currency':s.currency,'Invoice Value (FC)':+(s.fc||0).toFixed(2),'Exchange Rate':+(s.rate||0).toFixed(4),'Invoice Value (INR)':Math.round(s.taxable),'Mode of Delivery':s.mode||'Electronic','Mode of Receipt / AD Bank':s.bank||'','Payment Terms (days)':'','Remarks':''}));}
+
+/* ---------- GSTR-1 ---------- */
+function gstr1(){
+  const sal=((S.reg.sal?.data)||[]).filter(s=>inPeriod(s.date));
+  const r2=n=>Math.round((n||0)*100)/100;
+  const inv=sal.filter(s=>s.doc==='INV'),notes=sal.filter(s=>s.doc!=='INV');
+  const b2b=inv.filter(s=>(s.kind==='DTA'||s.kind==='SEZ')&&s.gstin).map(s=>({'GSTIN/UIN of Recipient':s.gstin,'Receiver Name':s.buyer,'Invoice Number':s.invno,'Invoice date':fmtGst(s.date),'Invoice Value':r2(s.total),'Place Of Supply':(s.pos||s.gstin.slice(0,2)),'Reverse Charge':'N','Applicable % of Tax Rate':'','Invoice Type':s.kind==='SEZ'?(s.igst>0?'SEZ Supplies with payment':'SEZ Supplies without payment'):'Regular B2B','E-Commerce GSTIN':'','Rate':s.gstrate||(s.taxable?r2(s.igst/s.taxable*100):0),'Taxable Value':r2(s.taxable),'Cess Amount':0}));
+  const exp=inv.filter(s=>s.kind.startsWith('Export')).map(s=>({'Export Type':s.igst>0?'WPAY':'WOPAY','Invoice Number':s.invno,'Invoice date':fmtGst(s.date),'Invoice Value':r2(s.total),'Port Code':s.port||'','Shipping Bill Number':s.sbno||'','Shipping Bill Date':fmtGst(s.sbdate),'Rate':s.igst>0?(s.gstrate||18):0,'Taxable Value':r2(s.taxable),'Cess Amount':0}));
+  const b2cMap={};for(const s of inv.filter(s=>s.kind==='DTA'&&!s.gstin)){const k=`${s.pos||''}|${s.gstrate||0}`;b2cMap[k]=b2cMap[k]||{'Type':'OE','Place Of Supply':s.pos||'','Applicable % of Tax Rate':'','Rate':s.gstrate||0,'Taxable Value':0,'Cess Amount':0,'E-Commerce GSTIN':''};b2cMap[k]['Taxable Value']=r2(b2cMap[k]['Taxable Value']+s.taxable);}
+  const b2cs=Object.values(b2cMap);
+  const cdnr=notes.filter(s=>s.gstin).map(s=>({'GSTIN/UIN of Recipient':s.gstin,'Receiver Name':s.buyer,'Note Number':s.invno,'Note Date':fmtGst(s.date),'Note Type':s.doc==='CN'?'C':'D','Place Of Supply':s.pos||s.gstin.slice(0,2),'Reverse Charge':'N','Note Supply Type':s.kind==='SEZ'?'SEZ Supplies with payment':'Regular B2B','Note Value':r2(Math.abs(s.total)),'Applicable % of Tax Rate':'','Rate':s.gstrate||0,'Taxable Value':r2(Math.abs(s.taxable)),'Cess Amount':0}));
+  const cdnur=notes.filter(s=>!s.gstin).map(s=>({'UR Type':s.kind.startsWith('Export')?(s.igst>0?'EXPWP':'EXPWOP'):'B2CL','Note Number':s.invno,'Note Date':fmtGst(s.date),'Note Type':s.doc==='CN'?'C':'D','Place Of Supply':s.pos||'','Note Value':r2(Math.abs(s.total)),'Applicable % of Tax Rate':'','Rate':s.gstrate||0,'Taxable Value':r2(Math.abs(s.taxable)),'Cess Amount':0}));
+  const hsnMap={};for(const s of sal){const k=`${s.hsn}|${s.gstrate||0}`;const sign=s.doc==='CN'?-1:1;const h=hsnMap[k]=hsnMap[k]||{'HSN':s.hsn||'','Description':String(s.desc||'').slice(0,30),'UQC':'OTH-OTHERS','Total Quantity':0,'Total Value':0,'Rate':s.gstrate||0,'Taxable Value':0,'Integrated Tax Amount':0,'Central Tax Amount':0,'State/UT Tax Amount':0,'Cess Amount':0,_b2b:!!s.gstin};h['Total Value']=r2(h['Total Value']+sign*Math.abs(s.total));h['Taxable Value']=r2(h['Taxable Value']+sign*Math.abs(s.taxable));h['Integrated Tax Amount']=r2(h['Integrated Tax Amount']+sign*Math.abs(s.igst));h['Total Quantity']+=1;}
+  const hsn=Object.values(hsnMap);
+  // docs: series ranges
+  const series={};for(const s of sal){const m=String(s.invno).match(/^(.*?)(\d+)$/);const pre=m?m[1]:s.invno,n=m?+m[2]:0;const key=(s.doc==='CN'?'Credit Note':s.doc==='DN'?'Debit Note':'Invoices for outward supply')+'|'+pre;const d=series[key]=series[key]||{nature:key.split('|')[0],pre,min:n,max:n,count:0,from:s.invno,to:s.invno};d.count++;if(n<d.min){d.min=n;d.from=s.invno;}if(n>d.max){d.max=n;d.to=s.invno;}}
+  const docs=Object.values(series).map(d=>({'Nature of Document':d.nature,'Sr. No. From':d.from,'Sr. No. To':d.to,'Total Number':d.count,'Cancelled':0}));
+  const sum=(a,k)=>r2(a.reduce((x,y)=>x+(+y[k]||0),0));
+  const summary={b2bTax:sum(b2b,'Taxable Value'),expTax:sum(exp,'Taxable Value'),b2cTax:sum(b2cs,'Taxable Value'),cnTax:sum(cdnr,'Taxable Value')+sum(cdnur,'Taxable Value'),igst:r2(sal.reduce((a,s)=>a+(s.doc==='CN'?-1:1)*Math.abs(s.igst),0)),outward:r2(sal.reduce((a,s)=>a+(s.doc==='CN'?-1:1)*Math.abs(s.taxable),0))};
+  return{b2b,exp,b2cs,cdnr,cdnur,hsn,docs,summary,count:sal.length};
+}
+
+/* ---------- reconciliation ---------- */
+function tol(a,b){const d=Math.abs((a||0)-(b||0));return d<=Math.max(1,Math.abs(a||0)*0.001);}
+function recon2B(){
+  const g=(S.reg.g2b?.data)||[],pur=((S.reg.pur?.data)||[]).filter(p=>inPeriod(p.date));
+  const books=pur.filter(p=>p.gstin&&p.stype!=='Import');
+  const idx=new Map();for(const b of books){idx.set(b.gstin+'|'+normInv(b.invno),b);}
+  const used=new Set();const rows=[];
+  for(const x of g){const k=x.gstin+'|'+normInv(x.invno);let b=idx.get(k);
+    if(!b){ // second chance: same GSTIN and same taxable value
+      b=books.find(p=>!used.has(p)&&p.gstin===x.gstin&&tol(p.taxable,x.taxable));}
+    if(b){used.add(b);const ok=tol(b.taxable,x.taxable)&&tol(b.igst,x.igst);rows.push({st:ok?'Matched':'Value differs',gstin:x.gstin,name:x.name||b.supplier,inv2b:x.invno,invbk:b.invno,tax2b:x.taxable,taxbk:b.taxable,igst2b:x.igst,igstbk:b.igst,diff:x.taxable-b.taxable,note:ok?'':(normInv(x.invno)!==normInv(b.invno)?'Invoice no. differs; matched on GSTIN + value':`Taxable differs by ₹${inr(x.taxable-b.taxable)}`)});}
+    else rows.push({st:'Only in GSTR-2B',gstin:x.gstin,name:x.name,inv2b:x.invno,invbk:'',tax2b:x.taxable,taxbk:0,igst2b:x.igst,igstbk:0,diff:x.taxable,note:'Supplier filed it; not in your purchase register — check missed booking or wrong month'});
+  }
+  for(const b of books){if(!used.has(b))rows.push({st:'Only in books',gstin:b.gstin,name:b.supplier,inv2b:'',invbk:b.invno,tax2b:0,taxbk:b.taxable,igst2b:0,igstbk:b.igst,diff:-b.taxable,note:b.igst===0?'No IGST in books — supplier may have billed under LUT (zero-rated); confirm filing':'Not in GSTR-2B — supplier has not filed / filed in another period'});}
+  const order={'Only in GSTR-2B':0,'Only in books':1,'Value differs':2,'Matched':3};rows.sort((a,b)=>order[a.st]-order[b.st]);
+  const k={matched:rows.filter(r=>r.st==='Matched').length,diff:rows.filter(r=>r.st==='Value differs').length,only2b:rows.filter(r=>r.st==='Only in GSTR-2B').length,onlybk:rows.filter(r=>r.st==='Only in books').length,imports:pur.filter(p=>p.stype==='Import').length,tax2b:g.reduce((a,x)=>a+x.taxable,0),taxbk:books.reduce((a,x)=>a+x.taxable,0)};
+  return{rows,k};
+}
+function reconTrade(side){ // side: 'pur' or 'sal'
+  const tr=(S.reg.trade?.data)||[];
+  const want=side==='pur'?['Import','DTA-Proc']:['Export','DTA-Sale'];
+  const t=tr.filter(x=>want.includes(x.kind));
+  const regRows=side==='pur'?((S.reg.pur?.data)||[]).filter(r=>inPeriod(r.date)&&r.stype==='Import'):((S.reg.sal?.data)||[]).filter(r=>inPeriod(r.date)&&r.doc!=='CN'&&(r.kind.startsWith('Export')||r.kind==='DTA'));
+  const byInv=new Map();for(const r of regRows)byInv.set(normInv(r.invno),r);
+  const byDoc=new Map();if(side==='pur')for(const r of regRows){if(r.boe)byDoc.set(normInv(r.boe),r);}else for(const r of regRows){if(r.sbno)byDoc.set(normInv(r.sbno),r);}
+  const used=new Set(),rows=[];
+  for(const x of t){let r=byInv.get(normInv(x.invno))||byDoc.get(normInv(x.docno));
+    const regVal=r?r.taxable:0;
+    if(r){used.add(r);const ok=tol(regVal,x.inr);rows.push({st:ok?'Matched':'Value differs',kind:x.kind,docno:x.docno,docdate:x.docdate,invno:x.invno,party:x.party||(side==='pur'?r.supplier:r.buyer),ccy:x.currency,fc:x.fc,inrSez:x.inr,inrReg:regVal,diff:x.inr-regVal,note:ok?'':`SEZ Online value differs by ₹${inr(x.inr-regVal)} — check exchange rate / assessable vs invoice value`});}
+    else rows.push({st:'Only in SEZ Online',kind:x.kind,docno:x.docno,docdate:x.docdate,invno:x.invno,party:x.party,ccy:x.currency,fc:x.fc,inrSez:x.inr,inrReg:0,diff:x.inr,note:'Filed on SEZ Online but not found in the register for this month'});}
+  for(const r of regRows){if(!used.has(r))rows.push({st:'Only in register',kind:side==='pur'?'Import':r.kind,docno:side==='pur'?r.boe:r.sbno,docdate:null,invno:r.invno,party:side==='pur'?r.supplier:r.buyer,ccy:r.currency,fc:r.fc,inrSez:0,inrReg:r.taxable,diff:-r.taxable,note:side==='pur'?'No BOE / procurement request found on SEZ Online':(r.kind==='Export-Service'?'No SERF / SOFTEX entry found — include in this month\'s SERF':'No Shipping Bill / DTA request found on SEZ Online')});}
+  const order={'Only in SEZ Online':0,'Only in register':1,'Value differs':2,'Matched':3};rows.sort((a,b)=>order[a.st]-order[b.st]);
+  const k={matched:rows.filter(r=>r.st==='Matched').length,diff:rows.filter(r=>r.st==='Value differs').length,onlySez:rows.filter(r=>r.st==='Only in SEZ Online').length,onlyReg:rows.filter(r=>r.st==='Only in register').length,sez:t.reduce((a,x)=>a+x.inr,0),reg:regRows.reduce((a,x)=>a+x.taxable,0)};
+  return{rows,k};
+}
+
+/* ---------- downloads ---------- */
+let downloadsNS=undefined;
+async function getDownloads(){if(downloadsNS!==undefined)return downloadsNS;try{downloadsNS=window.claude?.use?await window.claude.use('downloads'):null;}catch(e){downloadsNS=null;}return downloadsNS;}
+async function saveFile(filename,data){
+  const dl=await getDownloads();
+  if(dl){try{await dl.save({filename,data});toast(`Saved ${filename}`);return;}catch(e){if(e&&e.code==='declined')return;if(e&&e.code!=='unavailable'&&e.code!=='not_granted'){toast(`Could not save: ${e.message||e.code}`);return;}}}
+  try{const blob=data instanceof Blob?data:new Blob([data]);const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename;document.body.append(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},2000);toast(`Downloading ${filename}`);}catch(e){toast('Download is not available in this view');}
+}
+function wbBlob(sheets){ // sheets: [{name, rows(array of objects) | aoa}]
+  const wb=XLSX.utils.book_new();
+  for(const s of sheets){const ws=s.aoa?XLSX.utils.aoa_to_sheet(s.aoa):XLSX.utils.json_to_sheet(s.rows.length?s.rows:[{'(no rows)':''}]);ws['!cols']=colWidths(s.aoa||s.rows);XLSX.utils.book_append_sheet(wb,ws,s.name.slice(0,31));}
+  const out=XLSX.write(wb,{bookType:'xlsx',type:'array'});return new Blob([out],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+}
+function colWidths(rows){if(!rows||!rows.length)return[];const arr=Array.isArray(rows[0])?rows:[Object.keys(rows[0]),...rows.map(r=>Object.values(r))];const n=Math.max(...arr.map(r=>r.length));const w=[];for(let i=0;i<n;i++){let mx=8;for(const r of arr.slice(0,200)){const l=String(r[i]??'').length;if(l>mx)mx=l;}w.push({wch:Math.min(mx+2,50)});}return w;}
+const fileTag=()=>`${(S.unit.name||'Unit').replace(/[^A-Za-z0-9]+/g,'_').slice(0,30)}_${MON_SHORT[S.period.m]}${S.period.y}`;
+
+/* ---------- rendering: header ---------- */
+function initHeader(){
+  const now=new Date();let pm=now.getMonth()-1,py=now.getFullYear();if(pm<0){pm=11;py--;}
+  try{const last=JSON.parse(localStorage.getItem('sezdesk:last')||'null');if(last){pm=last.m;py=last.y;}}catch(e){}
+  S.period={m:pm,y:py};
+  const ms=$('#periodMonth'),ys=$('#periodYear');
+  MON_SHORT.forEach((m,i)=>ms.append(el('option',{value:i},['January','February','March','April','May','June','July','August','September','October','November','December'][i])));
+  for(let y=now.getFullYear()-3;y<=now.getFullYear()+1;y++)ys.append(el('option',{value:y},String(y)));
+  ms.value=pm;ys.value=py;
+  ms.addEventListener('change',()=>{S.period.m=+ms.value;switchPeriod();});
+  ys.addEventListener('change',()=>{S.period.y=+ys.value;switchPeriod();});
+}
+function switchPeriod(){const hit=load();if(!hit&&!Object.values(S.reg).some(Boolean)){loadSample();}else if(!hit){for(const k of Object.keys(S.reg))S.reg[k]=null;S.sample=false;}else S.sample=false;renderAll();save();}
+
+/* ---------- rendering: tiles ---------- */
+function tile(kind){
+  const r=S.reg[kind],meta=REG_META[kind];
+  const status=r?(r.sample?el('span',{class:'chip info'},'Example'):el('span',{class:'chip ok'},`${r.data.length} rows`)):el('span',{class:'chip idle'},'Not uploaded');
+  const input=el('input',{type:'file',id:`file-${kind}`,accept:'.xlsx,.xls,.csv',multiple:kind==='trade'?'multiple':null,onchange:e=>handleFiles(kind,[...e.target.files])});
+  const drop=el('label',{class:'drop',for:`file-${kind}`,ondragover:e=>{e.preventDefault();drop.classList.add('over');},ondragleave:()=>drop.classList.remove('over'),ondrop:e=>{e.preventDefault();drop.classList.remove('over');handleFiles(kind,[...e.dataTransfer.files]);}},
+    input,el('div',null,el('strong',null,r&&!r.sample?'Replace file':'Drop file here or click to choose')),el('div',{class:'small muted'},'.xlsx · .xls · .csv'));
+  const t=el('div',{class:'tile',id:`tile-${kind}`},
+    el('div',{class:'t-title'},el('h3',null,meta.title),status),
+    el('div',{class:'small muted'},meta.hint),
+    drop,
+    el('div',{class:'t-meta'},el('span',{class:'mono',title:r?.file||''},r?.file?trunc(r.file,28):'—'),el('span',null,'→ '+meta.feeds)),
+    el('div',{class:'t-actions'},
+      r&&r.headers?el('button',{class:'btn sm',onclick:()=>openMapper(kind)},'Check column mapping'):null,
+      r?el('button',{class:'btn sm ghost',onclick:()=>previewRows(kind)},'View rows'):null,
+      r&&!r.sample?el('button',{class:'btn sm ghost',onclick:()=>{S.reg[kind]=null;save();renderAll();}},'Remove'):null));
+  return t;
+}
+const trunc=(s,n)=>s.length>n?s.slice(0,n-1)+'…':s;
+function renderTiles(){$('#sampleBar').hidden=!Object.values(S.reg).some(r=>r&&r.sample);}
+
+/* ---------- file handling & mapping ---------- */
+async function handleFiles(kind,files){
+  if(!files.length)return;
+  try{
+    if(kind==='trade'){ // multiple files / sheets allowed
+      const all=[];const names=[];
+      for(const f of files){const sheets=await readWorkbook(f);names.push(f.name);
+        for(const sh of sheets){const hdr=detectHeaderRow(sh.aoa,'trade');const map=autoMap(sh.aoa[hdr],'trade');if(map.invno==null&&map.docno==null)continue;const sk=classifyTradeSheet(sh,hdr);const rows=applyMap(sh,hdr,map).map(r=>Object.assign(r,{_sheetKind:sk,_sheet:sh.name}));all.push(...rows);}}
+      if(!all.length){toast('Could not find BOE / SB / invoice columns in those files');return;}
+      S.reg.trade={file:names.join(', '),data:normalize('trade',all),sample:false};
+      const unk=S.reg.trade.data.filter(x=>!x.sheet&&!x.kindRaw).length;
+      if(unk)openKindPicker();else{clearSampleIfAny();save();renderAll();toast(`${S.reg.trade.data.length} SEZ Online rows loaded`);}
+      return;
+    }
+    const f=files[0];const sheets=await readWorkbook(f);
+    // pick best sheet: for 2B prefer sheet named B2B
+    let sh=sheets[0];if(kind==='g2b'){sh=sheets.find(s=>/^b2b$/i.test(s.name.trim()))||sheets.find(s=>/b2b/i.test(s.name))||sheets.reduce((a,b)=>b.aoa.length>a.aoa.length?b:a,sheets[0]);}
+    else if(sheets.length>1){sh=sheets.reduce((a,b)=>b.aoa.length>a.aoa.length?b:a,sheets[0]);}
+    const hdr=detectHeaderRow(sh.aoa,kind);const headers=sh.aoa[hdr].map(h=>String(h??'').trim());
+    const map=autoMap(headers,kind);
+    S.reg[kind]={file:f.name+(sheets.length>1?` › ${sh.name}`:''),sheet:sh,hdr,headers,map,sheets,sample:false,data:[]};
+    const missing=FIELDS[kind].filter(f=>f[2]&&map[f[0]]==null);
+    if(missing.length)openMapper(kind,true);else{commitMap(kind);toast(`${S.reg[kind].data.length} rows read from ${f.name}`);}
+  }catch(e){console.error(e);toast('Could not read that file — is it a valid Excel/CSV?');}
+}
+function commitMap(kind){const r=S.reg[kind];r.data=normalize(kind,applyMap(r.sheet,r.hdr,r.map));clearSampleIfAny();save();renderAll();}
+function clearSampleIfAny(){for(const k of Object.keys(S.reg)){if(S.reg[k]?.sample)S.reg[k]=null;}if(S.sample){S.sample=false;S.opening={invCr:0,expFob:0,expSvc:0,impCap:0,impRaw:0,dtaProc:0,dtaSale:0};}}
+function openMapper(kind,forced){
+  const r=S.reg[kind];if(!r||!r.headers)return;
+  const host=$('#modalHost');const missing=FIELDS[kind].filter(f=>f[2]&&r.map[f[0]]==null);
+  const sheetSel=r.sheets&&r.sheets.length>1?el('div',{class:'row'},el('label',{for:'sheetPick'},'Sheet:'),el('select',{id:'sheetPick',onchange:e=>{const sh=r.sheets[+e.target.value];r.sheet=sh;r.hdr=detectHeaderRow(sh.aoa,kind);r.headers=sh.aoa[r.hdr].map(h=>String(h??'').trim());r.map=autoMap(r.headers,kind);r.file=r.file.split(' › ')[0]+' › '+sh.name;openMapper(kind,forced);}},...r.sheets.map((s,i)=>el('option',{value:i,selected:s===r.sheet?'':null},`${s.name} (${s.aoa.length} rows)`)))):null;
+  const grid=el('div',{class:'map-grid'});
+  for(const[key,label,req]of FIELDS[kind]){
+    const sel=el('select',{id:`map-${kind}-${key}`,onchange:e=>{if(e.target.value==='')delete r.map[key];else r.map[key]=+e.target.value;}},el('option',{value:''},'— not in file —'),...r.headers.map((h,i)=>el('option',{value:i,selected:r.map[key]===i?'':null},h||`(column ${i+1})`)));
+    grid.append(el('div',{class:'map-row'},el('div',null,label,req?el('span',{class:'req'},' *'):null),sel));
+  }
+  const modal=el('div',{class:'modal',onclick:e=>{if(e.target===modal)close();}},el('div',{class:'modal-card',role:'dialog','aria-modal':'true'},
+    el('div',{class:'panel-head'},el('h2',null,`Column mapping — ${REG_META[kind].title}`),el('span',{class:'spacer'}),el('button',{class:'btn sm ghost',onclick:()=>close()},'✕')),
+    el('div',{class:'panel-body'},
+      missing.length?el('div',{class:'note'},`We could not find: ${missing.map(m=>m[1]).join(', ')}. Pick the matching column from your file, or choose "not in file" if it truly is not there.`):el('div',{class:'note info'},'Columns were detected automatically. Change any that look wrong and press Apply.'),
+      sheetSel,
+      el('div',{class:'small muted'},`Header row detected at row ${r.hdr+1}. Fields marked * are needed.`),
+      grid,
+      el('div',{class:'row',style:'justify-content:flex-end'},el('button',{class:'btn',onclick:()=>close()},'Cancel'),el('button',{class:'btn primary',onclick:()=>{const still=FIELDS[kind].filter(f=>f[2]&&r.map[f[0]]==null);if(still.length){toast(`Still missing: ${still.map(m=>m[1]).join(', ')}`);return;}commitMap(kind);close();toast(`${r.data.length} rows loaded`);}},'Apply mapping')))));
+  function close(){host.replaceChildren();if(forced&&!r.data.length){S.reg[kind]=null;renderAll();}}
+  host.replaceChildren(modal);
+}
+function openKindPicker(){ // classify SEZ Online sheets that could not be auto-detected
+  const r=S.reg.trade;const sheetsUnk=[...new Set(r.data.filter(x=>!x.sheet&&!x.kindRaw).map(x=>x._sheet||'Sheet'))];
+  const host=$('#modalHost');const sels={};
+  const modal=el('div',{class:'modal'},el('div',{class:'modal-card'},el('div',{class:'panel-head'},el('h2',null,'What does each SEZ Online sheet contain?')),
+    el('div',{class:'panel-body'},el('p',{class:'muted',style:'margin:0'},'We could not tell from the column names. Choose the transaction type for each sheet.'),
+      ...sheetsUnk.map(n=>el('div',{class:'map-row'},el('div',null,n),sels[n]=el('select',null,...['Export','Import','DTA-Sale','DTA-Proc'].map(k=>el('option',{value:k},k))))),
+      el('div',{class:'row',style:'justify-content:flex-end'},el('button',{class:'btn primary',onclick:()=>{for(const x of r.data){if(!x.sheet&&!x.kindRaw){x.kind=sels[x._sheet||'Sheet']?.value||'Export';}}host.replaceChildren();clearSampleIfAny();save();renderAll();}},'Continue')))));
+  host.replaceChildren(modal);
+}
+function previewRows(kind){
+  const r=S.reg[kind];if(!r)return;const rows=r.data.slice(0,300);const hide=new Set(['kindRaw','sheet','type','goods','doctype','address','bank','mode']);if(kind!=='pur')hide.add('stype');const keys=rows.length?Object.keys(rows[0]).filter(k=>!k.startsWith('_')&&!hide.has(k)):[];
+  const host=$('#modalHost');
+  const modal=el('div',{class:'modal',onclick:e=>{if(e.target===modal)host.replaceChildren();}},el('div',{class:'modal-card',style:'width:min(1100px,100%)'},
+    el('div',{class:'panel-head'},el('h2',null,`${REG_META[kind].title} — ${r.data.length} rows`),el('span',{class:'spacer'}),el('button',{class:'btn sm ghost',onclick:()=>host.replaceChildren()},'✕')),
+    el('div',{class:'panel-body'},rows.length?table(keys.map(k=>({k,l:k,n:typeof rows[0][k]==='number'})),rows.map(x=>{const o={};for(const k of keys){const v=x[k];o[k]=v instanceof Date?fmtD(v):(typeof v==='number'?(Number.isInteger(v)?inr(v):inr2(v)):String(v??''));}return o;})):el('div',{class:'empty'},'No rows'),r.data.length>300?el('p',{class:'cap'},'Showing first 300 rows.'):null)));
+  host.replaceChildren(modal);
+}
+
+/* ---------- generic table ---------- */
+function table(cols,rows,opts={}){ // cols: [{k,l,n,cls}] ; rows: array of objects ; opts.rowClass(row)
+  const thead=el('thead',null,el('tr',null,...cols.map(c=>el('th',{class:c.n?'n':''},c.l))));
+  const tbody=el('tbody');
+  for(const r of rows){const tr=el('tr',{class:opts.rowClass?opts.rowClass(r):''});for(const c of cols){const v=c.f?c.f(r):r[c.k];tr.append(el('td',{class:(c.n?'n ':'')+(c.cls||'')},v==null?'':v));}tbody.append(tr);}
+  return el('div',{class:'twrap'},el('table',null,thead,tbody));
+}
+const chipFor=st=>{const cls=st==='Matched'?'ok':st==='Value differs'?'warn':'bad';return el('span',{class:'chip '+cls},st);};
+
+/* ---------- rendering: documents ---------- */
+function renderDocs(){
+  const body=$('#docBody');if(!body)return;const have=S.reg.sal||S.reg.pur||S.reg.emp;
+
+  if(!have){body.replaceChildren(el('div',{class:'empty'},'Upload the registers in Step 1 — the MPR, SERF and GSTR-1 appear here.'));return;}
+  body.replaceChildren(S.docTab==='mpr'?renderMPR():S.docTab==='serf'?renderSERF():renderGSTR1());
+}
+function renderMPR(){
+  const M=computeMPR();const{E,T,C}=M;const wrap=el('div',{class:'stack'});
+  wrap.append(el('div',{class:'row'},el('div',null,el('div',{class:'eyebrow'},'Monthly Performance Report'),el('h3',null,`${S.unit.name||'Unit'} · ${periodLabel()} · FY ${fyLabel()}`)),el('span',{class:'spacer',style:'flex:1'}),el('button',{class:'btn primary',onclick:downloadMPR},'Download MPR working (Excel)')));
+  wrap.append(el('div',{class:'kpis'},
+    kpi('Employees at month-end',E.total,`${E.direct.M+E.contract.M} M · ${E.direct.F+E.contract.F} W · ${E.direct.T+E.contract.T} TG`),
+    kpi('Exports this month (₹)',inr(T.expGoods+T.expSvc),`Goods ${lakh(T.expGoods)} L · Services ${lakh(T.expSvc)} L`),
+    kpi('Imports this month (₹)',inr(T.impCap+T.impRaw),`Capital ${lakh(T.impCap)} L · Other ${lakh(T.impRaw)} L`),
+    kpi('DTA sales (₹)',inr(T.dtaSale),`DTA procurement ₹${inr(T.dtaProcCap+T.dtaProcRaw)}`),
+    kpi('Cumulative investment (₹ Cr)',C.invCr.toFixed(4),`+${cr(T.capAdd)} Cr this month`),
+    kpi('Cumulative NFE FY (₹)',inr(C.nfe),'Exports − imports, indicative')));
+  const O=S.opening;
+  // Section A Employment
+  const secA=[['Direct – Men',E.direct.M],['Direct – Women',E.direct.F],['Direct – Transgender / other',E.direct.T],['Contract – Men',E.contract.M],['Contract – Women',E.contract.F],['Contract – Transgender / other',E.contract.T],['Total employment',E.total],['Joined during the month',E.joined],['Left during the month',E.left],['Foreign nationals',E.foreign]];
+  const fxs=o=>Object.entries(o).map(([c,v])=>`${c} ${fx(v)}`).join(' · ')||'—';
+  const secC=[
+    ['Export of goods (FOB)',T.expGoods,C.expGoods,fxs(T.expGoodsFx)],
+    ['Export of services',T.expSvc,C.expSvc,fxs(T.expSvcFx)],
+    ['Total exports',T.expGoods+T.expSvc,C.expGoods+C.expSvc,''],
+    ['Import – capital goods (CIF)',T.impCap,C.impCap,fxs(T.impFx)],
+    ['Import – raw material, consumables, others',T.impRaw,C.impRaw,''],
+    ['Total imports',T.impCap+T.impRaw,C.impCap+C.impRaw,''],
+    ['DTA procurement (capital)',T.dtaProcCap,null,''],['DTA procurement (others)',T.dtaProcRaw,null,''],['Total DTA procurement',T.dtaProcCap+T.dtaProcRaw,C.dtaProc,''],
+    ['Supplies received from other SEZ / IFSC units',T.sezProc,null,''],
+    ['DTA sales',T.dtaSale,C.dtaSale,''],['Supplies to other SEZ / IFSC units',T.sezSale,null,''],
+    ['NFE (cumulative exports − cumulative imports)',null,C.nfe,'Indicative — Rule 53 needs full FX-outgo detail'],
+  ];
+  wrap.append(el('div',{class:'two'},
+    el('div',null,el('h3',{style:'margin-bottom:6px'},'A · Employment (as on last day of month)'),table([{k:'l',l:'Particulars'},{k:'v',l:'Nos.',n:true}],secA.map(([l,v])=>({l,v})),{rowClass:r=>r.l.startsWith('Total')?'tot':''})),
+    el('div',null,el('h3',{style:'margin-bottom:6px'},'B · Investment (₹ Crore)'),table([{k:'l',l:'Particulars'},{k:'v',l:'₹ Cr',n:true}],[{l:'Capital goods added this month (import + DTA + SEZ)',v:cr(T.capAdd)},{l:'  of which imported',v:cr(T.impCap)},{l:'  of which DTA',v:cr(T.dtaProcCap)},{l:'Cumulative investment up to last month',v:(+O.invCr||0).toFixed(4)},{l:'Cumulative investment to date',v:C.invCr.toFixed(4)}],{rowClass:r=>r.l.startsWith('Cumulative investment to')?'tot':''}))));
+  wrap.append(el('div',null,el('h3',{style:'margin-bottom:6px'},'C · Trade (₹) — for the month and cumulative FY'),table([{k:'l',l:'Particulars',cls:'wrap'},{k:'m',l:'This month ₹',n:true},{k:'c',l:'Cumulative FY ₹',n:true},{k:'f',l:'Foreign currency (month)'}],secC.map(([l,m,c,f])=>({l,m:m==null?'':inr(m),c:c==null?'':inr(c),f})),{rowClass:r=>/^Total|^NFE/.test(r.l)?'tot':''})));
+  wrap.append(el('p',{class:'cap'},'Layout follows the SEZ Online v3.1 MPR redesign (Employment M/W/TG · Investment ₹ Cr cumulative · Trade blocks). Column (a) on the portal is auto-populated from your filed BOE/SB/SERF; use these figures for column (b) and to check column (a).'));
+  return wrap;
+}
+function kpi(l,v,sub,cls){return el('div',{class:'kpi '+(cls||'')},el('div',{class:'l'},l),el('div',{class:'v'},String(v)),sub?el('div',{class:'small muted'},sub):null);}
+function downloadMPR(){const{E,T,C}=computeMPR();const O=S.opening;
+  const aoa=[[`Monthly Performance Report — ${S.unit.name||'Unit'}`],[`Period: ${periodLabel()}  |  FY ${fyLabel()}  |  GSTIN ${S.unit.gstin||''}  |  LOA ${S.unit.loa||''}  |  IEC ${S.unit.iec||''}  |  ${S.unit.sez||''}`],[],
+    ['A. EMPLOYMENT (as on month-end)','Men','Women','Transgender/Other','Total'],['Direct',E.direct.M,E.direct.F,E.direct.T,E.direct.M+E.direct.F+E.direct.T],['Contract',E.contract.M,E.contract.F,E.contract.T,E.contract.M+E.contract.F+E.contract.T],['Total',E.direct.M+E.contract.M,E.direct.F+E.contract.F,E.direct.T+E.contract.T,E.total],['Joined this month',E.joined],['Left this month',E.left],['Foreign nationals',E.foreign],[],
+    ['B. INVESTMENT (Rs Crore)','This month','Cumulative'],['Capital goods – imported',+cr(T.impCap),''],['Capital goods – DTA',+cr(T.dtaProcCap),''],['Total addition',+cr(T.capAdd),''],['Investment to date','',+C.invCr.toFixed(4)],[],
+    ['C. TRADE (Rs)','This month','Cumulative FY','FX (month)'],
+    ['Export of goods (FOB)',Math.round(T.expGoods),Math.round(C.expGoods),Object.entries(T.expGoodsFx).map(([c,v])=>`${c} ${v.toFixed(2)}`).join('; ')],
+    ['Export of services',Math.round(T.expSvc),Math.round(C.expSvc),Object.entries(T.expSvcFx).map(([c,v])=>`${c} ${v.toFixed(2)}`).join('; ')],
+    ['Total exports',Math.round(T.expGoods+T.expSvc),Math.round(C.expGoods+C.expSvc)],
+    ['Import – capital goods',Math.round(T.impCap),Math.round(C.impCap),Object.entries(T.impFx).map(([c,v])=>`${c} ${v.toFixed(2)}`).join('; ')],
+    ['Import – raw material/others',Math.round(T.impRaw),Math.round(C.impRaw)],['Total imports',Math.round(T.impCap+T.impRaw),Math.round(C.impCap+C.impRaw)],
+    ['DTA procurement',Math.round(T.dtaProcCap+T.dtaProcRaw),Math.round(C.dtaProc)],['Inter-SEZ/IFSC procurement',Math.round(T.sezProc)],
+    ['DTA sales',Math.round(T.dtaSale),Math.round(C.dtaSale)],['Inter-SEZ/IFSC supplies',Math.round(T.sezSale)],
+    ['NFE (cumulative, indicative)','',Math.round(C.nfe)],[],['Opening (cumulative up to last month)','Investment Cr',O.invCr,'Exp goods',O.expFob,'Exp services',O.expSvc,'Imp capital',O.impCap,'Imp others',O.impRaw,'DTA proc',O.dtaProc,'DTA sales',O.dtaSale]];
+  const M=computeMPR();
+  saveFile(`MPR_${fileTag()}.xlsx`,wbBlob([{name:'MPR',aoa},{name:'Exports',rows:M.sm.filter(s=>s.kind.startsWith('Export')).map(s=>({Date:fmtD(s.date),Invoice:s.invno,Type:s.doc,Customer:s.buyer,Country:s.country,Kind:s.kind,Currency:s.currency,'FC value':s.fc,'INR value':s.taxable,'SB no':s.sbno}))},{name:'Imports & procurement',rows:M.pm.map(p=>({Date:fmtD(p.date),Invoice:p.invno,Supplier:p.supplier,GSTIN:p.gstin,Source:p.stype,'Capital/Non-capital':p.cap,Currency:p.currency,'FC value':p.fc,'INR value':p.taxable,IGST:p.igst,BOE:p.boe}))},{name:'Employees',rows:M.active.map(e=>({Name:e.name,Gender:e.g,Category:e.cat,'Date of joining':fmtD(e.doj),Nationality:e.nat}))}]));}
+
+function renderSERF(){
+  const rows=serfRows();const wrap=el('div',{class:'stack'});
+  const tot=rows.reduce((a,r)=>a+r['Invoice Value (INR)'],0);const ccy={};for(const r of rows)ccy[r.Currency]=(ccy[r.Currency]||0)+r['Invoice Value (FC)'];
+  wrap.append(el('div',{class:'row'},el('div',null,el('div',{class:'eyebrow'},'Service Export Reporting Form'),el('h3',null,`${rows.length} export service invoices · ${periodLabel()}`)),el('span',{style:'flex:1'}),el('button',{class:'btn primary',disabled:rows.length?null:'',onclick:()=>saveFile(`SERF_${fileTag()}.xlsx`,wbBlob([{name:'SERF Item Details',rows}]))},'Download SERF upload sheet (Excel)')));
+  wrap.append(el('div',{class:'kpis'},kpi('Invoices',rows.length),kpi('Total value (₹)',inr(tot)),...Object.entries(ccy).map(([c,v])=>kpi(`Total ${c}`,fx(v)))));
+  if(!rows.length)wrap.append(el('div',{class:'empty'},'No export-of-service invoices found for this month. Check the sales register supply type / currency / country columns.'));
+  else wrap.append(table([{k:'Sr. No.',l:'#',n:true},{k:'Invoice No.',l:'Invoice'},{k:'Invoice Date',l:'Date'},{k:'Client Name',l:'Client'},{k:'Country of Client',l:'Country'},{k:'Service Category / SAC',l:'SAC'},{k:'Service Description',l:'Description',cls:'wrap'},{k:'Currency',l:'Ccy'},{k:'Invoice Value (FC)',l:'Value FC',n:true,f:r=>fx(r['Invoice Value (FC)'])},{k:'Exchange Rate',l:'Rate',n:true},{k:'Invoice Value (INR)',l:'Value ₹',n:true,f:r=>inr(r['Invoice Value (INR)'])},{k:'Mode of Delivery',l:'Mode'}],rows));
+  wrap.append(el('p',{class:'cap'},'Credit notes are excluded (SERF reports invoices; adjust via the SOFTEX/SERF amendment route). Check the column order against your unit\'s SERF Item Details Upload Template v5 before uploading — the sheet is arranged to paste column-wise into the template.'));
+  return wrap;
+}
+function renderGSTR1(){
+  const G=gstr1();const wrap=el('div',{class:'stack'});
+  wrap.append(el('div',{class:'row'},el('div',null,el('div',{class:'eyebrow'},'GSTR-1 · outward supplies'),el('h3',null,`${G.count} documents · ${periodLabel()} · GSTIN ${S.unit.gstin||'—'}`)),el('span',{style:'flex:1'}),el('button',{class:'btn primary',onclick:downloadGSTR1},'Download GSTR-1 workbook (Excel)')));
+  wrap.append(el('div',{class:'kpis'},kpi('Total taxable outward (₹)',inr(G.summary.outward)),kpi('B2B taxable (₹)',inr(G.summary.b2bTax),`${G.b2b.length} invoices`),kpi('Exports taxable (₹)',inr(G.summary.expTax),`${G.exp.length} invoices`),kpi('B2C (₹)',inr(G.summary.b2cTax)),kpi('Credit/Debit notes (₹)',inr(G.summary.cnTax),`${G.cdnr.length+G.cdnur.length} notes`),kpi('IGST payable (₹)',inr(G.summary.igst))));
+  const sec=(title,rows,cols)=>el('div',null,el('h3',{style:'margin-bottom:6px'},`${title} `,el('span',{class:'small muted'},`(${rows.length})`)),rows.length?table(cols,rows):el('div',{class:'empty small'},'No rows'));
+  wrap.append(sec('Table 4 · B2B (DTA & SEZ supplies to registered persons) — sheet "b2b,sez,de"',G.b2b,[{k:'GSTIN/UIN of Recipient',l:'GSTIN'},{k:'Receiver Name',l:'Receiver'},{k:'Invoice Number',l:'Invoice'},{k:'Invoice date',l:'Date'},{k:'Invoice Value',l:'Value',n:true,f:r=>inr2(r['Invoice Value'])},{k:'Place Of Supply',l:'POS'},{k:'Invoice Type',l:'Type'},{k:'Rate',l:'Rate %',n:true},{k:'Taxable Value',l:'Taxable',n:true,f:r=>inr2(r['Taxable Value'])}]));
+  wrap.append(sec('Table 6A · Exports — sheet "exp"',G.exp,[{k:'Export Type',l:'Type'},{k:'Invoice Number',l:'Invoice'},{k:'Invoice date',l:'Date'},{k:'Invoice Value',l:'Value',n:true,f:r=>inr2(r['Invoice Value'])},{k:'Port Code',l:'Port'},{k:'Shipping Bill Number',l:'SB no.'},{k:'Shipping Bill Date',l:'SB date'},{k:'Rate',l:'Rate %',n:true},{k:'Taxable Value',l:'Taxable',n:true,f:r=>inr2(r['Taxable Value'])}]));
+  wrap.append(el('div',{class:'two'},
+    sec('Table 9B · Credit / debit notes (registered) — "cdnr"',G.cdnr,[{k:'GSTIN/UIN of Recipient',l:'GSTIN'},{k:'Note Number',l:'Note'},{k:'Note Date',l:'Date'},{k:'Note Type',l:'C/D'},{k:'Note Value',l:'Value',n:true,f:r=>inr2(r['Note Value'])},{k:'Taxable Value',l:'Taxable',n:true,f:r=>inr2(r['Taxable Value'])}]),
+    sec('Table 9B · Notes (unregistered / export) — "cdnur"',G.cdnur,[{k:'UR Type',l:'Type'},{k:'Note Number',l:'Note'},{k:'Note Date',l:'Date'},{k:'Note Type',l:'C/D'},{k:'Note Value',l:'Value',n:true,f:r=>inr2(r['Note Value'])},{k:'Taxable Value',l:'Taxable',n:true,f:r=>inr2(r['Taxable Value'])}])));
+  wrap.append(el('div',{class:'two'},
+    sec('Table 12 · HSN / SAC summary — "hsn"',G.hsn,[{k:'HSN',l:'HSN/SAC'},{k:'Description',l:'Description'},{k:'Rate',l:'Rate %',n:true},{k:'Total Value',l:'Total',n:true,f:r=>inr2(r['Total Value'])},{k:'Taxable Value',l:'Taxable',n:true,f:r=>inr2(r['Taxable Value'])},{k:'Integrated Tax Amount',l:'IGST',n:true,f:r=>inr2(r['Integrated Tax Amount'])}]),
+    sec('Table 13 · Documents issued — "docs"',G.docs,[{k:'Nature of Document',l:'Nature'},{k:'Sr. No. From',l:'From'},{k:'Sr. No. To',l:'To'},{k:'Total Number',l:'Count',n:true},{k:'Cancelled',l:'Cancelled',n:true}])));
+  if(G.b2cs.length)wrap.append(sec('Table 7 · B2C small — "b2cs"',G.b2cs,[{k:'Place Of Supply',l:'POS'},{k:'Rate',l:'Rate %',n:true},{k:'Taxable Value',l:'Taxable',n:true,f:r=>inr2(r['Taxable Value'])}]));
+  wrap.append(el('p',{class:'cap'},'Sheet names and headers follow the GST Offline Tool Excel template so each sheet can be pasted into the template (below its three summary rows) and imported. Exports are marked WPAY when IGST is charged, else WOPAY (LUT). Inter-SEZ supplies are tagged "SEZ Supplies with/without payment". Confirm the template version before import.'));
+  return wrap;
+}
+function downloadGSTR1(){const G=gstr1();saveFile(`GSTR1_${fileTag()}.xlsx`,wbBlob([{name:'Summary',aoa:[['GSTR-1 working',S.unit.name||'',S.unit.gstin||'',periodLabel()],[],['Section','Rows','Taxable value'],['b2b,sez,de',G.b2b.length,G.summary.b2bTax],['exp',G.exp.length,G.summary.expTax],['b2cs',G.b2cs.length,G.summary.b2cTax],['cdnr',G.cdnr.length,G.cdnr.reduce((a,r)=>a+r['Taxable Value'],0)],['cdnur',G.cdnur.length,G.cdnur.reduce((a,r)=>a+r['Taxable Value'],0)],['hsn',G.hsn.length,''],['docs',G.docs.length,''],[],['Total outward taxable',G.summary.outward],['IGST',G.summary.igst]]},{name:'b2b,sez,de',rows:G.b2b},{name:'exp',rows:G.exp},{name:'b2cs',rows:G.b2cs},{name:'cdnr',rows:G.cdnr},{name:'cdnur',rows:G.cdnur},{name:'hsn',rows:G.hsn.map(({_b2b,...r})=>r)},{name:'docs',rows:G.docs}]));}
+
+/* ---------- rendering: reconciliation ---------- */
+function renderRecon(){
+  const body=$('#recBody');if(!body)return;
+  const R2=S.reg.g2b&&S.reg.pur?recon2B():null,RI=S.reg.trade&&S.reg.pur?reconTrade('pur'):null,RE=S.reg.trade&&S.reg.sal?reconTrade('sal'):null;
+  const issues=R=>R?R.rows.filter(r=>r.st!=='Matched').length:0;
+  const setC=(id,R)=>{const e=$(id);if(e)e.textContent=R?`${issues(R)} to check`:'';};setC('#r2bCnt',R2);setC('#rimpCnt',RI);setC('#rexpCnt',RE);
+  const wrap=el('div',{class:'stack'});
+  const dl=el('div',{class:'row'},el('span',{style:'flex:1'}),el('button',{class:'btn primary',disabled:(R2||RI||RE)?null:'',onclick:()=>saveFile(`Reconciliation_${fileTag()}.xlsx`,wbBlob([{name:'GSTR-2B vs Purchases',rows:(R2?.rows||[]).map(r=>({Status:r.st,GSTIN:r.gstin,Supplier:r.name,'Invoice (2B)':r.inv2b,'Invoice (books)':r.invbk,'Taxable (2B)':r.tax2b,'Taxable (books)':r.taxbk,'IGST (2B)':r.igst2b,'IGST (books)':r.igstbk,Difference:r.diff,Remark:r.note}))},{name:'SEZ Online vs Purchases',rows:(RI?.rows||[]).map(tradeOut)},{name:'SEZ Online vs Sales',rows:(RE?.rows||[]).map(tradeOut)}]))},'Download reconciliation (Excel)'));
+  wrap.append(dl);
+  if(S.recTab==='r2b'){
+    if(!R2){wrap.append(el('div',{class:'empty'},S.reg.pur?'Upload the GSTR-2B Excel above to compare it with the purchase register.':'Upload the purchase register (Step 1) and the GSTR-2B Excel.'));}
+    else{const k=R2.k;wrap.append(el('div',{class:'kpis'},kpi('Matched',k.matched,'',k.matched?'good':''),kpi('Value differs',k.diff,'',k.diff?'warn':''),kpi('Only in GSTR-2B',k.only2b,'not booked / other month',k.only2b?'bad':''),kpi('Only in books',k.onlybk,'supplier not filed',k.onlybk?'bad':''),kpi('Taxable per 2B (₹)',inr(k.tax2b)),kpi('Taxable per books (₹)',inr(k.taxbk),`${k.imports} import rows excluded`)));
+      wrap.append(table([{k:'st',l:'Status',f:r=>chipFor(r.st)},{k:'gstin',l:'GSTIN'},{k:'name',l:'Supplier'},{k:'inv2b',l:'Invoice (2B)'},{k:'invbk',l:'Invoice (books)'},{k:'tax2b',l:'Taxable 2B',n:true,f:r=>r.tax2b?inr(r.tax2b):''},{k:'taxbk',l:'Taxable books',n:true,f:r=>r.taxbk?inr(r.taxbk):''},{k:'igst2b',l:'IGST 2B',n:true,f:r=>r.igst2b?inr(r.igst2b):''},{k:'igstbk',l:'IGST books',n:true,f:r=>r.igstbk?inr(r.igstbk):''},{k:'diff',l:'Diff',n:true,f:r=>r.st==='Matched'?'':inr(r.diff)},{k:'note',l:'What to do',cls:'wrap'}],R2.rows));
+      wrap.append(el('p',{class:'cap'},'Match key: supplier GSTIN + invoice number (punctuation and leading zeros ignored); fallback: same GSTIN and same taxable value. Tolerance ₹1 or 0.1%. Import invoices (no GSTIN) are not part of GSTR-2B and are checked against SEZ Online instead.'));}
+  } else {
+    const R=S.recTab==='rimp'?RI:RE;const side=S.recTab==='rimp'?'Purchases':'Sales';
+    if(!R){wrap.append(el('div',{class:'empty'},`Upload the SEZ Online trade data and the ${side.toLowerCase()} register to compare them.`));}
+    else{const k=R.k;wrap.append(el('div',{class:'kpis'},kpi('Matched',k.matched,'',k.matched?'good':''),kpi('Value differs',k.diff,'',k.diff?'warn':''),kpi('Only in SEZ Online',k.onlySez,'',k.onlySez?'bad':''),kpi('Only in register',k.onlyReg,S.recTab==='rimp'?'no BOE found':'no SB / SERF found',k.onlyReg?'bad':''),kpi('Value per SEZ Online (₹)',inr(k.sez)),kpi('Value per register (₹)',inr(k.reg))));
+      wrap.append(table([{k:'st',l:'Status',f:r=>chipFor(r.st)},{k:'kind',l:'Type'},{k:'docno',l:'BOE / SB / Request'},{k:'docdate',l:'Doc date',f:r=>fmtD(r.docdate)},{k:'invno',l:'Invoice'},{k:'party',l:'Party'},{k:'ccy',l:'Ccy'},{k:'fc',l:'FC value',n:true,f:r=>r.fc?fx(r.fc):''},{k:'inrSez',l:'₹ SEZ Online',n:true,f:r=>r.inrSez?inr(r.inrSez):''},{k:'inrReg',l:'₹ Register',n:true,f:r=>r.inrReg?inr(r.inrReg):''},{k:'diff',l:'Diff',n:true,f:r=>r.st==='Matched'?'':inr(r.diff)},{k:'note',l:'What to do',cls:'wrap'}],R.rows));
+      wrap.append(el('p',{class:'cap'},S.recTab==='rimp'?'Import rows of the purchase register are matched to BOE / procurement requests by invoice number, then by BOE number. DTA purchases are covered by the GSTR-2B check.':'Export and DTA-sale rows of the sales register are matched to Shipping Bills / SERF / DTA requests by invoice number, then by SB number. Credit notes are excluded.'));}
+  }
+  body.replaceChildren(wrap);
+}
+const tradeOut=r=>({Status:r.st,Type:r.kind,'BOE/SB/Request':r.docno,'Doc date':fmtD(r.docdate),Invoice:r.invno,Party:r.party,Currency:r.ccy,'FC value':r.fc,'INR SEZ Online':r.inrSez,'INR register':r.inrReg,Difference:r.diff,Remark:r.note});
+
+/* ============================================================
+   Workbench shell — horizontal step strip, one screen at a time
+   ============================================================ */
+const STEPS=[
+  {id:'unit',n:'01',t:'Unit master',s:()=>S.unit.name&&S.unit.gstin?(S.unit._sample?'Example unit':'Complete'):'Fill in once',cls:()=>S.unit.name&&S.unit.gstin&&!S.unit._sample?'done':''},
+  {id:'uploads',n:'02',t:'Upload registers',s:()=>{const n=['emp','pur','sal'].filter(k=>S.reg[k]&&!S.reg[k].sample).length;return n===3?'3 of 3 uploaded':n?`${n} of 3 uploaded`:'Employee · Purchase · Sales';},cls:()=>['emp','pur','sal'].every(k=>S.reg[k]&&!S.reg[k].sample)?'done':''},
+  {id:'mpr',n:'03',t:'MPR',s:()=>S.reg.sal||S.reg.pur||S.reg.emp?'Ready to review':'Needs registers',cls:()=>''},
+  {id:'serf',n:'04',t:'SERF',s:()=>S.reg.sal?`${serfRows().length} service invoices`:'Needs sales register',cls:()=>''},
+  {id:'dspf',n:'05',t:'DSPF',s:()=>S.reg.pur?`${dspfRows().length} DTA invoices`:'Needs purchase register',cls:()=>''},
+  {id:'gstr1',n:'06',t:'GSTR-1',s:()=>S.reg.sal?`${gstr1().count} documents`:'Needs sales register',cls:()=>''},
+  {id:'recon',n:'07',t:'Reconcile',s:()=>{if(!S.reg.g2b&&!S.reg.trade)return'2B · SEZ Online';const n=reconIssues();return n?`${n} to check`:'All matched';},cls:()=>{if(!S.reg.g2b&&!S.reg.trade)return'';return reconIssues()?'warn':'done';}},
+  {id:'pack',n:'08',t:'Filing pack',s:()=>{const c=CAL.filter(x=>S.checks[x.id]).length;return `${c} of ${CAL.length} filed`;},cls:()=>CAL.every(x=>S.checks[x.id])?'done':''},
+];
+function reconIssues(){let n=0;if(S.reg.g2b&&S.reg.pur)n+=recon2B().rows.filter(r=>r.st!=='Matched').length;if(S.reg.trade){if(S.reg.pur)n+=reconTrade('pur').rows.filter(r=>r.st!=='Matched').length;if(S.reg.sal)n+=reconTrade('sal').rows.filter(r=>r.st!=='Matched').length;}return n;}
+function renderStrip(){const st=$('#strip');st.replaceChildren(...STEPS.map(x=>el('button',{class:'wstep '+x.cls(),role:'tab','aria-current':S.screen===x.id?'true':'false',onclick:()=>goScreen(x.id)},el('span',{class:'n'},x.n),el('span',{class:'t'},x.t),el('span',{class:'s'},x.s()))));}
+function goScreen(id){S.screen=id;try{localStorage.setItem('sezdesk:screen',id);}catch(e){}renderStrip();renderScreen();window.scrollTo({top:0});}
+function renderUnitLine(){const u=S.unit;$('#unitLine').replaceChildren(el('b',null,u.name||'No unit set'),u.gstin?el('span',null,'· GSTIN '+u.gstin):null,u.loa?el('span',null,'· LOA '+u.loa):null,el('span',null,'· '+periodLabel()+' · FY '+fyLabel()));}
+function screenHead(title,desc,...actions){return el('div',{class:'screen-head'},el('div',null,el('h2',null,title),desc?el('p',null,desc):null),actions.length?el('div',{class:'actions'},...actions):null);}
+function navFoot(){const i=STEPS.findIndex(x=>x.id===S.screen);return el('div',{class:'nav-foot'},i>0?el('button',{class:'btn',onclick:()=>goScreen(STEPS[i-1].id)},'← '+STEPS[i-1].t):el('span'),i<STEPS.length-1?el('button',{class:'btn primary',onclick:()=>goScreen(STEPS[i+1].id)},STEPS[i+1].t+' →'):el('span'));}
+function renderScreen(){
+  const sc=$('#screen');let body;
+  switch(S.screen){
+    case 'unit':body=screenUnit();break;
+    case 'uploads':body=screenUploads();break;
+    case 'mpr':body=el('div',{class:'stack'},screenHead('Monthly Performance Report','Employment, investment and trade for the month, in the SEZ Online v3.1 layout. Cumulative-to-last-month figures come from the Unit master.'),el('div',{class:'panel'},el('div',{class:'panel-body'},renderMPR())));break;
+    case 'serf':body=el('div',{class:'stack'},screenHead('SERF — Service Export Reporting Form','One row per export-of-service invoice, arranged for the SEZ Online Item Details Upload Template v5.'),el('div',{class:'panel'},el('div',{class:'panel-body'},renderSERF())));break;
+    case 'dspf':body=screenDSPF();break;
+    case 'gstr1':body=el('div',{class:'stack'},screenHead('GSTR-1 — outward supplies','B2B, exports, notes, HSN and document summary, in GST Offline Tool sheet layout.'),el('div',{class:'panel'},el('div',{class:'panel-body'},renderGSTR1())));break;
+    case 'recon':body=screenRecon();break;
+    case 'pack':body=screenPack();break;
+    default:body=el('div',{class:'empty'},'Pick a step above.');
+  }
+  sc.replaceChildren(body,navFoot());
+}
+
+/* ---------- screen: unit master ---------- */
+function screenUnit(){
+  const u=S.unit;const grid=el('div',{class:'form-grid'});
+  for(const[k,l,kind]of UNIT_FIELDS){
+    let inp;
+    if(kind&&kind.startsWith('sel:')){inp=el('select',{id:'u-'+k,onchange:e=>{S.unit[k]=e.target.value;touchUnit();}},...kind.slice(4).split('|').map(o=>el('option',{value:o,selected:u[k]===o?'':null},o)));}
+    else inp=el('input',{type:kind==='date'?'date':'text',id:'u-'+k,value:u[k]||'',oninput:e=>{S.unit[k]=(k==='gstin'||k==='pan'||k==='iec')?e.target.value.toUpperCase():e.target.value;touchUnit();}});
+    grid.append(el('div',{class:'field',style:kind==='wide'?'grid-column:span 2':''},el('label',{for:'u-'+k},l),inp));
+  }
+  const O=S.opening;const of=(k,l)=>el('div',{class:'field'},el('label',{for:'op-'+k},l),el('input',{type:'number',id:'op-'+k,value:O[k]||0,step:'any',onchange:e=>{S.opening[k]=+e.target.value||0;save();}}));
+  return el('div',{class:'stack'},
+    screenHead('Unit master','Entered once and reused on every document: headers, Excel exports and the filing pack. Saved in this browser.'),
+    u._sample?el('div',{class:'note info'},'This is an example unit. Type over it with your unit\'s details — the example flag clears as soon as you edit.'):null,
+    el('div',{class:'panel'},el('div',{class:'panel-head'},el('h3',null,'Identity & registrations')),el('div',{class:'panel-body'},grid)),
+    el('div',{class:'panel'},el('div',{class:'panel-head'},el('h3',null,'Cumulative figures up to last month — FY '+fyLabel()),el('span',{class:'small muted'},'From the last filed MPR / APR. The current month is added automatically.')),
+      el('div',{class:'panel-body form-grid'},of('invCr','Investment to date (₹ Cr)'),of('expFob','Export of goods FOB (₹)'),of('expSvc','Export of services (₹)'),of('impCap','Import – capital goods (₹)'),of('impRaw','Import – raw material / others (₹)'),of('dtaProc','DTA procurement (₹)'),of('dtaSale','DTA sales (₹)'))),
+    el('div',{class:'reg-strip'},...[['GSTIN',u.gstin],['PAN',u.pan],['IEC',u.iec],['LOA',u.loa],['LOA valid till',u.loaValid],['GST LUT',u.lut],['AD code',u.adcode]].map(([l,v])=>el('div',null,el('div',{class:'l'},l),el('div',{class:'v'},v||'—')))));
+}
+function touchUnit(){if(S.unit._sample)delete S.unit._sample;save();renderUnitLine();const s=$('#strip');if(s)renderStrip();}
+
+/* ---------- screen: uploads ---------- */
+function screenUploads(){
+  return el('div',{class:'stack'},
+    screenHead('Upload the three monthly registers','Excel or CSV in any column layout. Columns are detected automatically; you can check the mapping on each tile.'),
+    el('div',{class:'tiles'},tile('emp'),tile('pur'),tile('sal')),
+    el('div',{class:'note info'},'Purchases are split into Import / DTA / SEZ and Capital / Non-capital from the file, or from currency, GSTIN, BOE and description when those columns are missing. Sales are split into Export-Goods / Export-Service / DTA / SEZ the same way.'));
+}
+
+/* ---------- DSPF (DTA Service/Supply Procurement Form) ---------- */
+function dspfRows(){
+  const pur=((S.reg.pur?.data)||[]).filter(p=>inPeriod(p.date)&&p.stype==='DTA'&&p.gstin);
+  return pur.map((p,i)=>({'Sr. No.':i+1,'Supplier Name':p.supplier,'Supplier GSTIN':p.gstin,'Supplier Address':'','Supplier State Code':p.gstin.slice(0,2),'Invoice No.':p.invno,'Invoice Date':fmtD(p.date),'Nature (Goods/Services)':/^99/.test(String(p.hsn))?'Services':'Goods','HSN / SAC':p.hsn||'','Description':String(p.desc||''),'Quantity':'','UQC':'','Taxable Value (INR)':Math.round(p.taxable),'IGST Rate %':p.taxable?Math.round(p.igst/p.taxable*10000)/100:0,'IGST Amount':Math.round(p.igst),'Invoice Value (INR)':Math.round(p.total||p.taxable+p.igst),'Tax Paid (Y/N)':p.igst>0?'Y':'N','Supplier LUT / Bond No.':'','Capital / Non-capital':p.cap,'Purpose (Authorised operation)':S.unit.sector||'','Mode of Transport':'','Vehicle / LR No.':'','E-way Bill No.':'','Unit LOA No.':S.unit.loa||'','Remarks':''}));
+}
+function screenDSPF(){
+  const rows=dspfRows();const tax=rows.reduce((a,r)=>a+r['Taxable Value (INR)'],0),igst=rows.reduce((a,r)=>a+r['IGST Amount'],0);
+  const wrap=el('div',{class:'stack'},
+    screenHead('DSPF — DTA procurement','One row per DTA (domestic) purchase invoice with a supplier GSTIN, for endorsement by the Specified Officer. Arranged for the DSPF Item Details Template v1.1.',
+      el('button',{class:'btn primary',disabled:rows.length?null:'',onclick:()=>saveFile(`DSPF_${fileTag()}.xlsx`,wbBlob([{name:'DSPF Item Details',rows}]))},'Download DSPF upload sheet (Excel)')),
+    el('div',{class:'kpis'},kpi('DTA invoices',rows.length),kpi('Taxable value (₹)',inr(tax)),kpi('IGST charged (₹)',inr(igst),igst?'Supplier charged tax — claim refund / check LUT':'All under LUT (zero-rated)'),kpi('Suppliers',new Set(rows.map(r=>r['Supplier GSTIN'])).size)),
+    rows.length?el('div',{class:'panel'},el('div',{class:'panel-body'},table([{k:'Sr. No.',l:'#',n:true},{k:'Supplier Name',l:'Supplier'},{k:'Supplier GSTIN',l:'GSTIN'},{k:'Invoice No.',l:'Invoice'},{k:'Invoice Date',l:'Date'},{k:'Nature (Goods/Services)',l:'Nature'},{k:'HSN / SAC',l:'HSN/SAC'},{k:'Description',l:'Description',cls:'wrap'},{k:'Taxable Value (INR)',l:'Taxable ₹',n:true,f:r=>inr(r['Taxable Value (INR)'])},{k:'IGST Amount',l:'IGST ₹',n:true,f:r=>inr(r['IGST Amount'])},{k:'Tax Paid (Y/N)',l:'Tax paid'},{k:'Capital / Non-capital',l:'Capital?'}],rows))):el('div',{class:'empty'},'No DTA purchase invoices with a supplier GSTIN found for this month.'),
+    el('p',{class:'cap'},'Supplier address, LUT/bond number, quantity/UQC, transport and e-way bill columns are left blank when the purchase register does not carry them — fill them in the sheet before upload. Purpose defaults to the unit\'s authorised operations from the Unit master.'));
+  return wrap;
+}
+
+/* ---------- screen: reconcile ---------- */
+function screenRecon(){
+  const tabs=el('div',{class:'tabs',role:'tablist'},
+    el('button',{class:'tab',role:'tab','data-tab':'r2b','aria-selected':S.recTab==='r2b'?'true':'false'},'GSTR-2B vs Purchase register ',el('span',{class:'cnt',id:'r2bCnt'})),
+    el('button',{class:'tab',role:'tab','data-tab':'rimp','aria-selected':S.recTab==='rimp'?'true':'false'},'SEZ Online vs Purchases ',el('span',{class:'cnt',id:'rimpCnt'})),
+    el('button',{class:'tab',role:'tab','data-tab':'rexp','aria-selected':S.recTab==='rexp'?'true':'false'},'SEZ Online vs Sales ',el('span',{class:'cnt',id:'rexpCnt'})));
+  wireTabs(tabs,'recTab',renderRecon);
+  const body=el('div',{class:'panel-body',id:'recBody'});
+  const wrap=el('div',{class:'stack'},
+    screenHead('Reconcile with GSTR-2B and SEZ Online','Upload the GSTR-2B Excel from the GST portal and the BOE / Shipping Bill / DTA reports from SEZ Online. Each is compared invoice by invoice with the registers from step 2.'),
+    el('div',{class:'tiles'},tile('g2b'),tile('trade')),
+    el('div',{class:'panel'},tabs,body));
+  setTimeout(renderRecon,0);
+  return wrap;
+}
+
+/* ---------- screen: filing pack & calendar ---------- */
+const CAL=[
+  {id:'mpr',t:'MPR on SEZ Online',d:10,who:'DC / SEZ Online',note:'Monthly Performance Report for the month'},
+  {id:'serf',t:'SERF / SOFTEX for service exports',d:30,who:'SEZ Online',note:'Within 30 days of invoice; batch upload via Item Details template'},
+  {id:'dspf',t:'DSPF endorsement of DTA purchases',d:30,who:'Specified Officer',note:'Get invoices endorsed so suppliers can claim zero-rating'},
+  {id:'gstr1',t:'GSTR-1',d:11,who:'GST portal',note:'Outward supplies (quarterly filers: QRMP dates)'},
+  {id:'gstr3b',t:'GSTR-3B',d:20,who:'GST portal',note:'Summary return and tax payment'},
+  {id:'2b',t:'GSTR-2B reconciliation',d:14,who:'Internal',note:'2B is generated on the 14th; reconcile before 3B'},
+  {id:'tds',t:'TDS payment',d:7,who:'Income-tax portal',note:'Tax deducted during the month'},
+  {id:'pf',t:'PF / ESIC contribution',d:15,who:'EPFO / ESIC',note:'For the month\'s payroll'},
+];
+function screenPack(){
+  const[ps,pe]=periodRange();const next=new Date(S.period.y,S.period.m+1,1);const today=new Date();
+  const items=CAL.map(c=>{const due=new Date(next.getFullYear(),next.getMonth(),c.d);const done=!!S.checks[c.id];const cls=done?'done':(today>due?'late':(due-today)/86400000<=7?'due':'');
+    return el('label',{class:'cal-item '+cls},el('input',{type:'checkbox',id:'chk-'+c.id,checked:done?'':null,onchange:e=>{S.checks[c.id]=e.target.checked;save();renderStrip();renderScreen();}}),el('div',null,el('div',{style:'font-weight:500'},c.t),el('div',{class:'d'},'Due '+fmtD(due)+' · '+c.who),el('div',{class:'small muted'},c.note)));});
+  const u=S.unit;
+  const dl=(label,sub,fn,ok)=>el('div',{class:'tile'},el('div',{class:'t-title'},el('h3',null,label),ok?el('span',{class:'chip ok'},'Ready'):el('span',{class:'chip idle'},'Needs data')),el('div',{class:'small muted'},sub),el('div',null,el('button',{class:'btn primary sm',disabled:ok?null:'',onclick:fn},'Download Excel')));
+  return el('div',{class:'stack'},
+    screenHead('Filing pack — '+periodLabel(),'Everything for the month in one place: the documents to download, the due dates, and a tick list saved per month.'),
+    el('div',{class:'reg-strip'},...[['Unit',u.name],['GSTIN',u.gstin],['LOA',u.loa],['IEC',u.iec],['GST LUT',u.lut],['Signatory',u.contact]].map(([l,v])=>el('div',null,el('div',{class:'l'},l),el('div',{class:'v'},v||'—')))),
+    el('h3',null,'Documents'),
+    el('div',{class:'pack'},
+      dl('MPR working','Employment · Investment · Trade + annexures',downloadMPR,!!(S.reg.sal||S.reg.pur||S.reg.emp)),
+      dl('SERF upload sheet','Export-of-service invoices, template v5 layout',()=>saveFile(`SERF_${fileTag()}.xlsx`,wbBlob([{name:'SERF Item Details',rows:serfRows()}])),!!S.reg.sal&&serfRows().length>0),
+      dl('DSPF upload sheet','DTA purchase invoices for endorsement',()=>saveFile(`DSPF_${fileTag()}.xlsx`,wbBlob([{name:'DSPF Item Details',rows:dspfRows()}])),!!S.reg.pur&&dspfRows().length>0),
+      dl('GSTR-1 workbook','Offline-tool sheets + summary',downloadGSTR1,!!S.reg.sal),
+      dl('Reconciliation report','2B vs purchases · SEZ Online vs registers',downloadRecon,!!(S.reg.g2b||S.reg.trade))),
+    el('h3',null,'Due dates & tick list'),
+    el('div',{class:'cal'},...items),
+    el('p',{class:'cap'},'Dates are the usual statutory / portal dates for the month following '+periodLabel()+'; confirm MPR, SERF and DSPF timing with your DC office. Ticks are saved for this month in this browser.'));
+}
+function downloadRecon(){const R2=S.reg.g2b&&S.reg.pur?recon2B():null,RI=S.reg.trade&&S.reg.pur?reconTrade('pur'):null,RE=S.reg.trade&&S.reg.sal?reconTrade('sal'):null;
+  saveFile(`Reconciliation_${fileTag()}.xlsx`,wbBlob([{name:'GSTR-2B vs Purchases',rows:(R2?.rows||[]).map(r=>({Status:r.st,GSTIN:r.gstin,Supplier:r.name,'Invoice (2B)':r.inv2b,'Invoice (books)':r.invbk,'Taxable (2B)':r.tax2b,'Taxable (books)':r.taxbk,'IGST (2B)':r.igst2b,'IGST (books)':r.igstbk,Difference:r.diff,Remark:r.note}))},{name:'SEZ Online vs Purchases',rows:(RI?.rows||[]).map(tradeOut)},{name:'SEZ Online vs Sales',rows:(RE?.rows||[]).map(tradeOut)}]));}
+
+/* ---------- misc ---------- */
+let toastT;function toast(msg){let t=$('.toast');if(!t){t=el('div',{class:'toast',role:'status'});document.body.append(t);}t.textContent=msg;clearTimeout(toastT);toastT=setTimeout(()=>t.remove(),3200);}
+function renderAll(){renderUnitLine();renderStrip();renderTiles();renderScreen();}
+function wireTabs(el_,key,fn){el_.addEventListener('click',e=>{const b=e.target.closest('.tab');if(!b)return;S[key]=b.dataset.tab;[...el_.children].forEach(t=>t.setAttribute('aria-selected',t===b?'true':'false'));fn();});}
+
+/* ---------- boot ---------- */
+function start(){
+  initHeader();
+  const hit=load();
+  if(!hit){loadSample();}else S.sample=false;
+  try{const sc=localStorage.getItem('sezdesk:screen');if(sc&&STEPS.some(x=>x.id===sc))S.screen=sc;}catch(e){}
+  $('#btnClearSample').addEventListener('click',()=>{for(const k of Object.keys(S.reg))if(S.reg[k]?.sample)S.reg[k]=null;if(S.unit._sample)S.unit={name:'',gstin:''};S.sample=false;S.opening={invCr:0,expFob:0,expSvc:0,impCap:0,impRaw:0,dtaProc:0,dtaSale:0};renderAll();});
+  renderAll();
+  getDownloads();
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start);else start();
+})();
+</script>
+</body></html>
