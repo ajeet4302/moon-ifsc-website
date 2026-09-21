@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Join Network | Moon IFSC Alliance</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/common.css" />
+  <link rel="stylesheet" href="css/join-network.css" />
+</head>
+<body>
+
+  <!-- ===== Header ===== -->
+  <header class="header">
+    <div class="container nav">
+      <a href="index.html" class="logo">
+        <img class="logo-img" src="images/moon-logo.png" alt="MOON logo" />
+        <span class="logo-text"><b>MOON IFSC</b><small>ALLIANCE</small></span>
+      </a>
+      <input type="checkbox" id="menu-toggle" class="menu-toggle" />
+      <label for="menu-toggle" class="burger" aria-label="Open menu"><span></span><span></span><span></span></label>
+      <nav class="nav-links">
+        <a href="index.html">Home</a>
+        <a href="about.html">About</a>
+        <a href="services.html">Services</a>
+        <a href="blogs.html">Blogs</a>
+        <a href="assignments.html">Assignments</a>
+        <a href="careers.html">Careers</a>
+        <a href="for-clients.html">For Clients</a>
+        <a href="join-network.html" class="active">Join Network</a>
+        <a href="for-clients.html" class="btn btn-accent btn-sm nav-cta">Request a Resource &rarr;</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- ===== Banner ===== -->
+  <section class="page-hero">
+    <div class="container">
+      <span class="eyebrow light">For professionals</span>
+      <h1>Join Moon IFSC Alliance's professional network</h1>
+      <p>Get access to assignment-based, short-term and full-time opportunities.</p>
+    </div>
+  </section>
+
+  <!-- ===== Who can join ===== -->
+  <section class="who-join">
+    <div class="container who-grid">
+      <span class="who-label">Who can join:</span>
+      <span class="who-pill">Chartered Accountants</span>
+      <span class="who-pill">CA Inter / Articles</span>
+      <span class="who-pill">CMA / CS</span>
+      <span class="who-pill">MBA Finance</span>
+      <span class="who-pill">B.Com / M.Com</span>
+      <span class="who-pill">Field Auditors</span>
+    </div>
+  </section>
+
+  <!-- ===== Registration form ===== -->
+  <section class="section">
+    <div class="container form-wrap">
+      <div class="form-intro">
+        <span class="eyebrow">Start a conversation</span>
+        <h2>Clear requirements.<br />Suitable resources.</h2>
+        <p>Use the form and share the essentials. We will take it from there.</p>
+        <div class="perks">
+          <div class="perk"><b>&#10003;</b><span>Assignments near your city</span></div>
+          <div class="perk"><b>&#10003;</b><span>Timely payments</span></div>
+          <div class="perk"><b>&#10003;</b><span>Exposure to large clients</span></div>
+          <div class="perk"><b>&#10003;</b><span>Flexible, project-based work</span></div>
+        </div>
+        <div class="contact-mini"><b>Questions?</b><a href="mailto:ratan.moondra@sezindia.co.in">ratan.moondra@sezindia.co.in</a></div>
+      </div>
+
+      <form class="form" onsubmit="event.preventDefault(); this.querySelector('.form-note').textContent='Thank you! Your registration has been submitted.'; this.reset();">
+        <div class="field"><label>Full Name <span class="req">*</span></label><input type="text" placeholder="Your full name" required /></div>
+        <div class="field"><label>Mobile Number <span class="req">*</span></label><input type="tel" placeholder="10-digit mobile number" required /></div>
+        <div class="field"><label>Email <span class="req">*</span></label><input type="email" placeholder="you@example.com" required /></div>
+        <div class="field"><label>City <span class="req">*</span></label><input type="text" placeholder="Your city" required /></div>
+        <div class="field"><label>State</label><input type="text" placeholder="Your state" /></div>
+        <div class="field"><label>Qualification</label><input type="text" placeholder="e.g. CA Inter, B.Com" /></div>
+        <div class="field"><label>Experience</label><input type="text" placeholder="e.g. 2 years" /></div>
+        <div class="field"><label>Professional Category</label><input type="text" placeholder="e.g. Field Auditor" /></div>
+        <div class="field"><label>Preferred Assignment</label><input type="text" placeholder="e.g. Stock Audit" /></div>
+        <div class="field"><label>Available Locations</label><input type="text" placeholder="Cities you can travel to" /></div>
+        <div class="field full"><label>Resume (PDF, DOC, DOCX - Max 5MB)</label><input type="file" accept=".pdf,.doc,.docx" /></div>
+        <div class="field full"><label>Additional Information</label><textarea rows="4" placeholder="Anything else you would like us to know"></textarea></div>
+        <div class="field full">
+          <button type="submit" class="btn btn-accent btn-block">Submit Registration &rarr;</button>
+          <p class="form-note"></p>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <!-- ===== Footer ===== -->
+  <footer class="footer">
+    <div class="container footer-grid">
+      <div>
+        <a href="index.html" class="logo light"><img class="logo-img" src="images/moon-logo.png" alt="MOON logo" /><span class="logo-text"><b>MOON IFSC</b><small>ALLIANCE</small></span></a>
+        <p>Part of the MOON group, founded in 2006 by CA Ratan Moondra &mdash; knowledge, technology and process led consultancy for SEZ, IFSC and audit requirements across India.</p>
+      </div>
+      <div>
+        <h4>Quick Links</h4>
+        <a href="index.html">Home</a><a href="about.html">About</a><a href="services.html">Services</a>
+        <a href="blogs.html">Blogs</a><a href="assignments.html">Assignments</a><a href="careers.html">Careers</a>
+      </div>
+      <div>
+        <h4>For Professionals</h4>
+        <a href="join-network.html">Join Our Network</a><a href="assignments.html">View Assignments</a>
+      </div>
+      <div>
+        <h4>Contact</h4>
+        <a href="tel:+919322825240">+91 93228 25240</a>
+        <a href="tel:+919373618577">+91 93736 18577</a>
+        <a href="mailto:ratan.moondra@sezindia.co.in">ratan.moondra@sezindia.co.in</a>
+        <a href="mailto:ashish.jhagarawat@sezindia.co.in">ashish.jhagarawat@sezindia.co.in</a>
+        <p class="footer-addr">Office No. 311, 312, Pride Purple Square, Kalewadi Phata, Wakad, Pune &ndash; 411057</p>
+      </div>
+    </div>
+    <div class="container footer-bottom">
+      <span>&copy; 2026 Moon IFSC Alliance. All rights reserved.</span>
+      <a href="#">Back to top &uarr;</a>
+    </div>
+  </footer>
+
+</body>
+</html>
