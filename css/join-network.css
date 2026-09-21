@@ -1,0 +1,28 @@
+/* =====================================================
+   JOIN NETWORK PAGE STYLES (join-network.html)
+   ===================================================== */
+
+/* ---------- Who can join strip ---------- */
+.who-join { background: var(--brand-green); padding: 22px 0; }
+.who-grid { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.who-label { font-weight: 800; color: var(--white); margin-right: 6px; }
+.who-pill {
+  background: rgba(255, 255, 255, .9); color: var(--ink);
+  padding: 6px 14px; border-radius: 99px; font-size: .88rem; font-weight: 600;
+}
+
+/* ---------- Perks list ---------- */
+.perks { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 28px; }
+.perk {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--white); border: 1px solid var(--line);
+  padding: 14px; border-radius: 12px; font-weight: 600; font-size: .9rem; color: var(--ink);
+}
+.perk b {
+  width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+  display: grid; place-items: center; background: var(--ink); color: var(--accent-light); font-size: .8rem;
+}
+
+@media (max-width: 640px) {
+  .perks { grid-template-columns: 1fr; }
+}

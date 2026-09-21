@@ -1,0 +1,27 @@
+/* =====================================================
+   SERVICES PAGE STYLES (services.html)
+   ===================================================== */
+
+.service-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+.svc {
+  position: relative; background: var(--white); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 32px 28px 30px; overflow: hidden;
+  transition: background .3s, transform .3s;
+}
+.svc::before {
+  content: ""; position: absolute; left: 0; top: 0; width: 5px; height: 0;
+  background: var(--accent); transition: height .3s;
+}
+.svc:hover { background: var(--ink); transform: translateY(-4px); }
+.svc:hover::before { height: 100%; }
+.svc:hover h3 { color: var(--white); }
+.svc:hover p { color: #b6d3c3; }
+.svc-no {
+  display: inline-block; font-family: "DM Serif Display", serif; font-size: 2.2rem;
+  color: var(--accent); line-height: 1; margin-bottom: 16px;
+}
+.svc h3 { font-size: 1.2rem; margin-bottom: 8px; transition: color .3s; }
+.svc p { color: var(--muted); font-size: .94rem; transition: color .3s; }
+
+@media (max-width: 1000px) { .service-list { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 640px)  { .service-list { grid-template-columns: 1fr; } }
